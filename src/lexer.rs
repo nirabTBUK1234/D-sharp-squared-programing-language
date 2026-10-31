@@ -22,8 +22,8 @@ pub enum TokenKind {
     Slash,
     Percent,
     Assign,
-    Is,
-    IsNot,
+    Equal,
+    NotEqual,
     Greater,
     GreaterEqual,
     Less,
@@ -33,13 +33,10 @@ pub enum TokenKind {
     Not,
 
     // keywords
-    Let,
-    Mut,
-    Const,
-    Static,
+    Def,
     Del,
-    Type,
     If,
+    Elif,
     Else,
     While,
     Loop,
@@ -47,13 +44,12 @@ pub enum TokenKind {
     In,
     Break,
     Continue,
+    Return,
     True,
     False,
+    None,
     Hashset,
     Matrix,
-    Def,
-    Fn,
-    Return,
 
     // literals
     Identifier(String),
@@ -90,6 +86,15 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Error> {
                 });
                 line += 1;
             }
+            // Python-style comment: everything to the end of the line.
+            '#' => {
+                while let Some(&c) = chars.peek() {
+                    if c == '\n' {
+                        break;
+                    }
+                    chars.next();
+                }
+            }
             '{' => single(&mut chars, &mut tokens, TokenKind::LeftBrace, token_line),
             '}' => single(&mut chars, &mut tokens, TokenKind::RightBrace, token_line),
             '(' => single(&mut chars, &mut tokens, TokenKind::LeftParen, token_line),
@@ -106,7 +111,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Error> {
                 chars.next();
                 let kind = if chars.peek() == Some(&'=') {
                     chars.next();
-                    TokenKind::Is
+                    TokenKind::Equal
                 } else {
                     TokenKind::Assign
                 };
@@ -119,7 +124,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Error> {
                 chars.next();
                 let kind = if chars.peek() == Some(&'=') {
                     chars.next();
-                    TokenKind::IsNot
+                    TokenKind::NotEqual
                 } else {
                     TokenKind::Not
                 };
@@ -240,13 +245,10 @@ fn identifier(chars: &mut Peekable<Chars<'_>>) -> String {
 
 fn keyword(word: &str) -> TokenKind {
     match word {
-        "let" => TokenKind::Let,
-        "mut" => TokenKind::Mut,
-        "const" => TokenKind::Const,
-        "static" => TokenKind::Static,
+        "def" => TokenKind::Def,
         "del" => TokenKind::Del,
-        "type" => TokenKind::Type,
         "if" => TokenKind::If,
+        "elif" => TokenKind::Elif,
         "else" => TokenKind::Else,
         "while" => TokenKind::While,
         "loop" => TokenKind::Loop,
@@ -254,22 +256,15 @@ fn keyword(word: &str) -> TokenKind {
         "in" => TokenKind::In,
         "break" => TokenKind::Break,
         "continue" => TokenKind::Continue,
-        "true" => TokenKind::True,
-        "false" => TokenKind::False,
-        "def" => TokenKind::Def,
-        "fn" => TokenKind::Fn,
         "return" => TokenKind::Return,
+        "True" | "true" => TokenKind::True,
+        "False" | "false" => TokenKind::False,
+        "None" | "none" => TokenKind::None,
         "hashset" | "set" => TokenKind::Hashset,
         "matrix" | "matrex" => TokenKind::Matrix,
         "and" => TokenKind::And,
         "or" => TokenKind::Or,
         "not" => TokenKind::Not,
-        "is" => TokenKind::Is,
-        "is_not" => TokenKind::IsNot,
-        "greater" => TokenKind::Greater,
-        "less" => TokenKind::Less,
-        "greater_equal" => TokenKind::GreaterEqual,
-        "less_equal" => TokenKind::LessEqual,
         _ => TokenKind::Identifier(word.to_string()),
     }
 }
@@ -365,17 +360,24 @@ mod tests {
     }
 
     #[test]
-    fn lexes_operators_and_keywords() {
+    fn lexes_pythonic_keywords() {
         assert_eq!(
-            kinds("if a is_not b and not c { }"),
+            kinds("if a != b and not c { } elif d { } else { }"),
             vec![
                 TokenKind::If,
                 TokenKind::Identifier("a".into()),
-                TokenKind::IsNot,
+                TokenKind::NotEqual,
                 TokenKind::Identifier("b".into()),
                 TokenKind::And,
                 TokenKind::Not,
                 TokenKind::Identifier("c".into()),
+                TokenKind::LeftBrace,
+                TokenKind::RightBrace,
+                TokenKind::Elif,
+                TokenKind::Identifier("d".into()),
+                TokenKind::LeftBrace,
+                TokenKind::RightBrace,
+                TokenKind::Else,
                 TokenKind::LeftBrace,
                 TokenKind::RightBrace,
                 TokenKind::Eof,
@@ -384,19 +386,26 @@ mod tests {
     }
 
     #[test]
-    fn lexes_symbolic_aliases() {
+    fn lexes_booleans_and_none() {
         assert_eq!(
-            kinds("a != b && !c || d >= 1"),
+            kinds("True False None"),
             vec![
-                TokenKind::Identifier("a".into()),
-                TokenKind::IsNot,
-                TokenKind::Identifier("b".into()),
-                TokenKind::And,
-                TokenKind::Not,
-                TokenKind::Identifier("c".into()),
-                TokenKind::Or,
-                TokenKind::Identifier("d".into()),
-                TokenKind::GreaterEqual,
+                TokenKind::True,
+                TokenKind::False,
+                TokenKind::None,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn skips_comments() {
+        let tokens = kinds("# a comment\nx = 1  # trailing\n");
+        assert_eq!(
+            tokens,
+            vec![
+                TokenKind::Identifier("x".into()),
+                TokenKind::Assign,
                 TokenKind::Int(1),
                 TokenKind::Eof,
             ]
@@ -406,11 +415,9 @@ mod tests {
     #[test]
     fn decodes_escapes_in_text() {
         assert_eq!(
-            kinds(r#"console.println("a\nb")"#),
+            kinds(r#"print("a\nb")"#),
             vec![
-                TokenKind::Identifier("console".into()),
-                TokenKind::Dot,
-                TokenKind::Identifier("println".into()),
+                TokenKind::Identifier("print".into()),
                 TokenKind::LeftParen,
                 TokenKind::Text("a\nb".into()),
                 TokenKind::RightParen,
@@ -421,22 +428,14 @@ mod tests {
 
     #[test]
     fn tracks_line_numbers_across_newlines() {
-        let tokens = lex("let a = 1\nlet b = 2\n").unwrap();
+        let tokens = lex("x = 1\ny = 2\n").unwrap();
         assert_eq!(tokens[0].line, 1);
-
-        let second_let = tokens
-            .iter()
-            .enumerate()
-            .filter(|(_, token)| token.kind == TokenKind::Let)
-            .map(|(index, _)| index)
-            .nth(1)
-            .unwrap();
-        assert_eq!(tokens[second_let].line, 2);
+        assert_eq!(tokens[5].line, 2);
     }
 
     #[test]
     fn rejects_unterminated_text() {
-        let error = lex(r#"let a = "oops"#).unwrap_err();
+        let error = lex(r#"a = "oops"#).unwrap_err();
         assert!(error.message.contains("unterminated text"), "{error}");
     }
 }

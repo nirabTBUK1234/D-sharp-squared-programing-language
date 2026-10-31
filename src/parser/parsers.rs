@@ -1,8 +1,6 @@
 use crate::error::Error;
 use crate::lexer::{Token, TokenKind, lex};
-use crate::parser::ast::{
-    BinaryOp, Callee, Expr, Parameter, Stmt, StmtKind, UnaryOp, VarKind,
-};
+use crate::parser::ast::{BinaryOp, Callee, Expr, Parameter, Stmt, StmtKind, UnaryOp};
 
 pub struct Parser {
     tokens: Vec<Token>,
@@ -22,6 +20,7 @@ impl Parser {
         let mut statements: Vec<Stmt> = Vec::new();
         while !self.check(&TokenKind::Eof) {
             statements.push(self.statement()?);
+            self.end_statement()?;
             self.skip_separators();
         }
 
@@ -32,27 +31,6 @@ impl Parser {
         let line = self.peek().line;
 
         match self.peek().kind.clone() {
-            TokenKind::Let => {
-                self.advance();
-                let kind = if self.match_kind(&TokenKind::Mut) {
-                    VarKind::Mut
-                } else {
-                    VarKind::Let
-                };
-                self.declaration(kind, line)
-            }
-            TokenKind::Mut => {
-                self.advance();
-                self.declaration(VarKind::Mut, line)
-            }
-            TokenKind::Const => {
-                self.advance();
-                self.declaration(VarKind::Const, line)
-            }
-            TokenKind::Static => {
-                self.advance();
-                self.declaration(VarKind::Static, line)
-            }
             TokenKind::Del => {
                 self.advance();
                 let name = self.consume_identifier("expected a name after 'del'")?;
@@ -61,17 +39,7 @@ impl Parser {
                     line,
                 })
             }
-            TokenKind::Type => {
-                self.advance();
-                let name = self.consume_identifier("expected a type name after 'type'")?;
-                self.consume(&TokenKind::Assign, "expected '=' after the type name")?;
-                let target = self.consume_identifier("expected a type name after '='")?;
-                Ok(Stmt {
-                    kind: StmtKind::TypeAlias { name, target },
-                    line,
-                })
-            }
-            TokenKind::Def | TokenKind::Fn => {
+            TokenKind::Def => {
                 self.advance();
                 self.function_statement(line)
             }
@@ -138,17 +106,6 @@ impl Parser {
             }
             _ => self.expression_statement(line),
         }
-    }
-
-    fn declaration(&mut self, kind: VarKind, line: usize) -> Result<Stmt, Error> {
-        let name = self.consume_identifier("expected a variable name")?;
-        self.consume(&TokenKind::Assign, "expected '=' after the variable name")?;
-        let value = self.expression()?;
-
-        Ok(Stmt {
-            kind: StmtKind::Declare { kind, name, value },
-            line,
-        })
     }
 
     fn function_statement(&mut self, line: usize) -> Result<Stmt, Error> {
@@ -234,13 +191,27 @@ impl Parser {
         let then_branch = self.block()?;
 
         let mut else_branch = None;
-        if self.match_kind(&TokenKind::Else) {
+
+        // `elif`/`else` may start on the same line as `}` or the line after it.
+        let saved = self.current;
+        self.skip_separators();
+
+        if self.check(&TokenKind::Elif) {
+            let elif_line = self.peek().line;
+            self.advance();
+            else_branch = Some(vec![self.if_statement(elif_line)?]);
+        } else if self.check(&TokenKind::Else) {
+            self.advance();
             if self.check(&TokenKind::If) {
-                let nested = self.statement()?;
-                else_branch = Some(vec![nested]);
+                // `else if` is accepted as a nested `if`; `elif` is preferred.
+                let nested_line = self.peek().line;
+                self.advance();
+                else_branch = Some(vec![self.if_statement(nested_line)?]);
             } else {
                 else_branch = Some(self.block()?);
             }
+        } else {
+            self.current = saved;
         }
 
         Ok(Stmt {
@@ -281,6 +252,7 @@ impl Parser {
         let mut statements: Vec<Stmt> = Vec::new();
         while !self.check(&TokenKind::RightBrace) && !self.check(&TokenKind::Eof) {
             statements.push(self.statement()?);
+            self.end_statement()?;
             self.skip_separators();
         }
 
@@ -326,10 +298,10 @@ impl Parser {
         let mut left = self.comparison_expression()?;
 
         loop {
-            let op = if self.match_kind(&TokenKind::Is) {
-                BinaryOp::Is
-            } else if self.match_kind(&TokenKind::IsNot) {
-                BinaryOp::IsNot
+            let op = if self.match_kind(&TokenKind::Equal) {
+                BinaryOp::Equal
+            } else if self.match_kind(&TokenKind::NotEqual) {
+                BinaryOp::NotEqual
             } else {
                 break;
             };
@@ -460,6 +432,10 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Bool(false))
             }
+            TokenKind::None => {
+                self.advance();
+                Ok(Expr::None)
+            }
             TokenKind::Text(text) => {
                 self.advance();
                 Ok(Expr::Text(text))
@@ -579,6 +555,7 @@ impl Parser {
                 | TokenKind::Text(_)
                 | TokenKind::True
                 | TokenKind::False
+                | TokenKind::None
                 | TokenKind::Identifier(_)
                 | TokenKind::LeftParen
                 | TokenKind::Minus
@@ -632,6 +609,24 @@ impl Parser {
         }
     }
 
+    fn end_statement(&mut self) -> Result<(), Error> {
+        if self.check(&TokenKind::Semicolon)
+            || self.check(&TokenKind::Newline)
+            || self.check(&TokenKind::RightBrace)
+            || self.check(&TokenKind::Eof)
+        {
+            return Ok(());
+        }
+
+        Err(Error::new(
+            self.peek().line,
+            format!(
+                "unexpected {} after a statement (missing a newline or ';'?)",
+                describe(&self.peek().kind)
+            ),
+        ))
+    }
+
     fn skip_separators(&mut self) {
         while self.check(&TokenKind::Semicolon) || self.check(&TokenKind::Newline) {
             self.advance();
@@ -665,7 +660,7 @@ mod tests {
         let statements = Parser::parse(source).unwrap();
         match statements.into_iter().next().unwrap().kind {
             StmtKind::Expression(expr) => expr,
-            StmtKind::Declare { value, .. } => value,
+            StmtKind::Assign { value, .. } => value,
             other => panic!("expected an expression, got {other:?}"),
         }
     }
@@ -706,12 +701,12 @@ mod tests {
 
     #[test]
     fn comparisons_chain_below_equality() {
-        let expr = expression_of("a is b greater 1");
+        let expr = expression_of("a == b > 1");
 
         let Expr::Binary { op, right, .. } = expr else {
             panic!("expected a binary expression");
         };
-        assert_eq!(op, BinaryOp::Is);
+        assert_eq!(op, BinaryOp::Equal);
         assert!(matches!(
             *right,
             Expr::Binary {
@@ -722,20 +717,43 @@ mod tests {
     }
 
     #[test]
-    fn parses_control_flow() {
-        let source = "if a greater 1 {\n    while a less 10 {\n        a = a + 1\n    }\n} else {\n    for x in hashset 1 2 3 {\n        console.println(x)\n        break\n    }\n}";
+    fn parses_pythonic_control_flow() {
+        let source = "if a > 1 {\n    while a < 10 {\n        a = a + 1\n    }\n} elif a == 1 {\n    print(a)\n} else {\n    for x in hashset 1 2 3 {\n        console.println(x)\n        break\n    }\n}";
         let statements = Parser::parse(source).unwrap();
         assert_eq!(statements.len(), 1);
 
         let StmtKind::If { else_branch, .. } = &statements[0].kind else {
             panic!("expected an if statement");
         };
-        assert!(else_branch.is_some());
+        let else_branch = else_branch.as_ref().expect("expected an else branch");
+        assert!(matches!(
+            else_branch.first().map(|stmt| &stmt.kind),
+            Some(StmtKind::If { .. })
+        ));
     }
 
     #[test]
     fn assignment_needs_a_variable() {
         let error = Parser::parse("1 = 2").unwrap_err();
         assert!(error.message.contains("only a variable"), "{error}");
+    }
+
+    #[test]
+    fn statements_need_a_separator() {
+        let error = Parser::parse("x = 1 y = 2").unwrap_err();
+        assert!(error.message.contains("after a statement"), "{error}");
+    }
+
+    #[test]
+    fn parses_none_and_definitions() {
+        let statements =
+            Parser::parse("def f(a, b = None) {\n    return None\n}\nx = f(1)").unwrap();
+        assert_eq!(statements.len(), 2);
+
+        let StmtKind::Function { params, .. } = &statements[0].kind else {
+            panic!("expected a function");
+        };
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[1].default, Some(Expr::None));
     }
 }

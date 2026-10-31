@@ -16,7 +16,7 @@ impl fmt::Display for SetItem {
         match self {
             SetItem::Int(n) => write!(f, "{n}"),
             SetItem::Float(bits) => write!(f, "{}", f64::from_bits(*bits)),
-            SetItem::Bool(b) => write!(f, "{b}"),
+            SetItem::Bool(b) => write!(f, "{}", bool_text(*b)),
             SetItem::Text(s) => write!(f, "\"{s}\""),
         }
     }
@@ -31,9 +31,13 @@ impl SetItem {
             Value::Text(s) => Ok(SetItem::Text(s)),
             Value::HashSet(_) => Err("hashset items cannot be another hashset".to_string()),
             Value::Matrix(_) => Err("hashset items cannot be a matrix".to_string()),
-            Value::Void => Err("hashset items cannot be void".to_string()),
+            Value::None => Err("hashset items cannot be None".to_string()),
         }
     }
+}
+
+fn bool_text(value: bool) -> &'static str {
+    if value { "True" } else { "False" }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -44,8 +48,9 @@ pub enum Value {
     Text(String),
     HashSet(HashSet<SetItem>),
     Matrix(HashMap<String, HashMap<String, Value>>),
-    /// The result of a call that only has side effects, e.g. `console.println`.
-    Void,
+    /// Python's `None`: the result of a call that only has side effects, and
+    /// what a function returns when it falls off the end.
+    None,
 }
 
 impl Value {
@@ -57,7 +62,7 @@ impl Value {
             Value::Text(_) => "text",
             Value::HashSet(_) => "hashset",
             Value::Matrix(_) => "matrix",
-            Value::Void => "void",
+            Value::None => "None",
         }
     }
 }
@@ -67,7 +72,7 @@ impl fmt::Display for Value {
         match self {
             Value::Int(n) => write!(f, "{n}"),
             Value::Float(n) => write!(f, "{n}"),
-            Value::Bool(b) => write!(f, "{b}"),
+            Value::Bool(b) => write!(f, "{}", bool_text(*b)),
             Value::Text(s) => write!(f, "{s}"),
             Value::HashSet(items) => {
                 let mut parts: Vec<String> = items.iter().map(ToString::to_string).collect();
@@ -96,7 +101,7 @@ impl fmt::Display for Value {
                 parts.sort();
                 write!(f, "matrix {}", parts.join(" "))
             }
-            Value::Void => write!(f, "void"),
+            Value::None => write!(f, "None"),
         }
     }
 }

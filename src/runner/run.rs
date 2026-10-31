@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::error::Error;
-use crate::parser::ast::{BinaryOp, Callee, Expr, Parameter, Stmt, StmtKind, UnaryOp, VarKind};
+use crate::parser::ast::{BinaryOp, Callee, Expr, Parameter, Stmt, StmtKind, UnaryOp};
 use crate::parser::parsers::Parser;
 use crate::value::{SetItem, Value};
 
@@ -34,15 +34,12 @@ pub fn run_with_env(env: &mut Env, source: &str) -> Result<(), Error> {
     Interpreter::new(env).run(&statements)
 }
 
+/// Python-style scoping: a scope is created per function call. Blocks
+/// (`if`, loops, `{ ... }`) do not introduce scopes, so names assigned in
+/// them stay visible afterwards.
 pub struct Env {
-    scopes: Vec<HashMap<String, Variable>>,
+    scopes: Vec<HashMap<String, Value>>,
     functions: Vec<HashMap<String, Rc<Function>>>,
-    types: HashMap<String, String>,
-}
-
-struct Variable {
-    kind: VarKind,
-    value: Value,
 }
 
 struct Function {
@@ -55,7 +52,6 @@ impl Env {
         Env {
             scopes: vec![HashMap::new()],
             functions: vec![HashMap::new()],
-            types: HashMap::new(),
         }
     }
 
@@ -84,82 +80,42 @@ impl Env {
             .find_map(|scope| scope.get(name).cloned())
     }
 
-    pub fn declare(&mut self, kind: VarKind, name: String, value: Value) -> Result<(), String> {
-        let scope = self.scopes.last_mut().expect("there is always a scope");
-
-        if let Some(existing) = scope.get(&name) {
-            let existing_kind = existing.kind;
-
-            if existing_kind.can_reassign() && kind == VarKind::Mut {
-                scope.insert(name, Variable { kind, value });
-                return Ok(());
-            }
-
-            return Err(format!(
-                "cannot redeclare '{}' (already a {} variable)",
-                name,
-                existing_kind.name()
-            ));
-        }
-
-        scope.insert(name, Variable { kind, value });
-        Ok(())
-    }
-
-    fn get(&self, name: &str) -> Option<&Variable> {
+    fn define(&mut self, name: String, value: Value) {
         self.scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(name))
+            .last_mut()
+            .expect("there is always a scope")
+            .insert(name, value);
     }
 
     pub fn get_value(&self, name: &str) -> Result<Value, String> {
-        match self.get(name) {
-            Some(variable) => Ok(variable.value.clone()),
-            None => Err(format!("unknown variable '{name}'")),
-        }
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).cloned())
+            .ok_or_else(|| format!("unknown variable '{name}'"))
     }
 
-    pub fn assign(&mut self, name: &str, value: Value) -> Result<(), String> {
+    /// `name = value`: updates the nearest existing binding, or creates one in
+    /// the current scope.
+    pub fn assign(&mut self, name: &str, value: Value) {
         for scope in self.scopes.iter_mut().rev() {
-            if let Some(variable) = scope.get_mut(name) {
-                if !variable.kind.can_reassign() {
-                    return Err(format!(
-                        "cannot assign to {} variable '{name}' (declare it with 'mut')",
-                        variable.kind.name()
-                    ));
-                }
-                variable.value = value;
-                return Ok(());
+            if scope.contains_key(name) {
+                scope.insert(name.to_string(), value);
+                return;
             }
         }
 
-        Err(format!("unknown variable '{name}'"))
+        self.define(name.to_string(), value);
     }
 
     pub fn delete(&mut self, name: &str) -> Result<(), String> {
         for scope in self.scopes.iter_mut().rev() {
-            if let Some(variable) = scope.get(name) {
-                let kind = variable.kind;
-
-                if !kind.can_delete() {
-                    return Err(format!("cannot delete {} variable '{name}'", kind.name()));
-                }
-
-                scope.remove(name);
+            if scope.remove(name).is_some() {
                 return Ok(());
             }
         }
 
         Err(format!("unknown variable '{name}'"))
-    }
-
-    pub fn define_type(&mut self, name: String, target: String) -> Result<(), String> {
-        if self.types.contains_key(&name) {
-            return Err(format!("type '{name}' is already defined"));
-        }
-        self.types.insert(name, target);
-        Ok(())
     }
 }
 
@@ -202,40 +158,18 @@ impl<'a> Interpreter<'a> {
         Ok(Flow::Normal)
     }
 
-    fn exec_block(&mut self, statements: &[Stmt]) -> Result<Flow, Error> {
-        self.env.push_scope();
-        let result = self.exec_statements(statements);
-        self.env.pop_scope();
-        result
-    }
-
     fn exec(&mut self, statement: &Stmt) -> Result<Flow, Error> {
         let line = statement.line;
 
         match &statement.kind {
-            StmtKind::Declare { kind, name, value } => {
-                let value = self.eval(value, line)?;
-                self.env
-                    .declare(*kind, name.clone(), value)
-                    .map_err(|message| Error::new(line, message))?;
-                Ok(Flow::Normal)
-            }
             StmtKind::Assign { name, value } => {
                 let value = self.eval(value, line)?;
-                self.env
-                    .assign(name, value)
-                    .map_err(|message| Error::new(line, message))?;
+                self.env.assign(name, value);
                 Ok(Flow::Normal)
             }
             StmtKind::Delete { name } => {
                 self.env
                     .delete(name)
-                    .map_err(|message| Error::new(line, message))?;
-                Ok(Flow::Normal)
-            }
-            StmtKind::TypeAlias { name, target } => {
-                self.env
-                    .define_type(name.clone(), target.clone())
                     .map_err(|message| Error::new(line, message))?;
                 Ok(Flow::Normal)
             }
@@ -251,7 +185,7 @@ impl<'a> Interpreter<'a> {
 
                 let value = match value {
                     Some(expr) => self.eval(expr, line)?,
-                    None => Value::Void,
+                    None => Value::None,
                 };
 
                 Ok(Flow::Return(value))
@@ -262,9 +196,9 @@ impl<'a> Interpreter<'a> {
                 else_branch,
             } => {
                 if self.eval_condition(condition, line)? {
-                    self.exec_block(then_branch)
+                    self.exec_statements(then_branch)
                 } else if let Some(branch) = else_branch {
-                    self.exec_block(branch)
+                    self.exec_statements(branch)
                 } else {
                     Ok(Flow::Normal)
                 }
@@ -298,15 +232,9 @@ impl<'a> Interpreter<'a> {
                 let items = iterate(&iterable, line)?;
 
                 for item in items {
-                    self.env.push_scope();
-                    let declared = self.env.declare(VarKind::Let, name.clone(), item);
-                    let flow = match declared {
-                        Ok(()) => self.exec_loop_body(body),
-                        Err(message) => Err(Error::new(line, message)),
-                    };
-                    self.env.pop_scope();
+                    self.env.assign(name, item);
 
-                    match flow? {
+                    match self.exec_loop_body(body)? {
                         Flow::Break => break,
                         Flow::Return(value) => return Ok(Flow::Return(value)),
                         Flow::Continue | Flow::Normal => {}
@@ -327,7 +255,7 @@ impl<'a> Interpreter<'a> {
                 }
                 Ok(Flow::Continue)
             }
-            StmtKind::Block(statements) => self.exec_block(statements),
+            StmtKind::Block(statements) => self.exec_statements(statements),
             StmtKind::Expression(expr) => {
                 self.eval(expr, line)?;
                 Ok(Flow::Normal)
@@ -337,7 +265,7 @@ impl<'a> Interpreter<'a> {
 
     fn exec_loop_body(&mut self, body: &[Stmt]) -> Result<Flow, Error> {
         self.loop_depth += 1;
-        let result = self.exec_block(body);
+        let result = self.exec_statements(body);
         self.loop_depth -= 1;
         result
     }
@@ -358,6 +286,7 @@ impl<'a> Interpreter<'a> {
             Expr::Int(number) => Ok(Value::Int(*number)),
             Expr::Float(number) => Ok(Value::Float(*number)),
             Expr::Bool(value) => Ok(Value::Bool(*value)),
+            Expr::None => Ok(Value::None),
             Expr::Text(text) => Ok(Value::Text(text.clone())),
             Expr::Var(name) => self
                 .env
@@ -432,9 +361,32 @@ impl<'a> Interpreter<'a> {
                     Callee::Method { receiver, method } => {
                         call_builtin(receiver, method, &values, line)
                     }
-                    Callee::Function(name) => self.call_function(name, values, line),
+                    Callee::Function(name) => self.call_named(name, values, line),
                 }
             }
+        }
+    }
+
+    /// Calls a user-defined function, or a Python-style builtin such as
+    /// `print(...)` / `input(...)` when no function of that name exists.
+    fn call_named(&mut self, name: &str, values: Vec<Value>, line: usize) -> Result<Value, Error> {
+        if self.env.get_function(name).is_some() {
+            return self.call_function(name, values, line);
+        }
+
+        match name {
+            "print" => {
+                let parts: Vec<String> = values.iter().map(ToString::to_string).collect();
+                println!("{}", parts.join(" "));
+                Ok(Value::None)
+            }
+            "input" => {
+                if !values.is_empty() {
+                    return Err(Error::new(line, "input() takes no arguments"));
+                }
+                read_input(line)
+            }
+            _ => Err(Error::new(line, format!("unknown function '{name}'"))),
         }
     }
 
@@ -444,9 +396,10 @@ impl<'a> Interpreter<'a> {
         values: Vec<Value>,
         line: usize,
     ) -> Result<Value, Error> {
-        let Some(function) = self.env.get_function(name) else {
-            return Err(Error::new(line, format!("unknown function '{name}'")));
-        };
+        let function = self
+            .env
+            .get_function(name)
+            .expect("call_named checked that the function exists");
 
         let required = function
             .params
@@ -485,7 +438,7 @@ impl<'a> Interpreter<'a> {
 
                 match flow? {
                     Flow::Return(value) => Ok(value),
-                    Flow::Normal => Ok(Value::Void),
+                    Flow::Normal => Ok(Value::None),
                     Flow::Break | Flow::Continue => Err(Error::new(
                         line,
                         "'break' or 'continue' escaped a function body",
@@ -521,9 +474,7 @@ impl<'a> Interpreter<'a> {
                 },
             };
 
-            self.env
-                .declare(VarKind::Let, param.name.clone(), value)
-                .map_err(|message| Error::new(line, message))?;
+            self.env.define(param.name.clone(), value);
         }
 
         Ok(())
@@ -568,7 +519,7 @@ fn call_console(method: &str, args: &[Value], line: usize) -> Result<Value, Erro
     match method {
         "clear" => {
             clear_screen(line)?;
-            Ok(Value::Void)
+            Ok(Value::None)
         }
         "input" => read_input(line),
         _ => {
@@ -587,7 +538,7 @@ fn call_console(method: &str, args: &[Value], line: usize) -> Result<Value, Erro
                 _ => unreachable!("the method list above and these arms are kept in sync"),
             }
 
-            Ok(Value::Void)
+            Ok(Value::None)
         }
     }
 }
@@ -601,10 +552,7 @@ fn read_input(line: usize) -> Result<Value, Error> {
         .map_err(|e| Error::new(line, format!("couldn't read input: {e}")))?;
 
     if bytes == 0 {
-        return Err(Error::new(
-            line,
-            "console.input() reached the end of the input",
-        ));
+        return Err(Error::new(line, "input() reached the end of the input"));
     }
 
     let text = buffer.trim_end_matches(['\n', '\r']).to_string();
@@ -649,8 +597,8 @@ fn unary_op(op: UnaryOp, value: Value, line: usize) -> Result<Value, Error> {
 
 fn binary_op(op: BinaryOp, left: Value, right: Value, line: usize) -> Result<Value, Error> {
     match op {
-        BinaryOp::Is => Ok(Value::Bool(left == right)),
-        BinaryOp::IsNot => Ok(Value::Bool(left != right)),
+        BinaryOp::Equal => Ok(Value::Bool(equal(&left, &right))),
+        BinaryOp::NotEqual => Ok(Value::Bool(!equal(&left, &right))),
         BinaryOp::Greater | BinaryOp::GreaterEqual | BinaryOp::Less | BinaryOp::LessEqual => {
             compare(op, &left, &right, line)
         }
@@ -659,6 +607,15 @@ fn binary_op(op: BinaryOp, left: Value, right: Value, line: usize) -> Result<Val
             arithmetic(op, left, right, line)
         }
         BinaryOp::And | BinaryOp::Or => unreachable!("and/or are evaluated with short-circuiting"),
+    }
+}
+
+/// Python compares `1 == 1.0` as equal even though they are different types.
+fn equal(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Int(a), Value::Float(b)) => (*a as f64) == *b,
+        (Value::Float(a), Value::Int(b)) => *a == (*b as f64),
+        _ => left == right,
     }
 }
 
@@ -698,11 +655,21 @@ fn arithmetic(op: BinaryOp, left: Value, right: Value, line: usize) -> Result<Va
             _ => unreachable!("only arithmetic operations reach here"),
         };
 
-        return result.map(Value::Int).ok_or_else(|| Error::new(line, "integer overflow"));
+        return result
+            .map(Value::Int)
+            .ok_or_else(|| Error::new(line, "integer overflow"));
     }
 
+    let action = match op {
+        BinaryOp::Subtract => "subtract",
+        BinaryOp::Multiply => "multiply",
+        BinaryOp::Divide => "divide",
+        BinaryOp::Remainder => "take the remainder of",
+        _ => unreachable!("only arithmetic operations reach here"),
+    };
+
     let Some((a, b)) = float_pair(&left, &right) else {
-        return Err(type_error(op.name(), &left, &right, line));
+        return Err(type_error(action, &left, &right, line));
     };
 
     let value = match op {
@@ -749,26 +716,6 @@ fn compare(op: BinaryOp, left: &Value, right: &Value, line: usize) -> Result<Val
     };
 
     Ok(Value::Bool(result))
-}
-
-impl BinaryOp {
-    fn name(self) -> &'static str {
-        match self {
-            BinaryOp::Or => "or",
-            BinaryOp::And => "and",
-            BinaryOp::Is => "is",
-            BinaryOp::IsNot => "is_not",
-            BinaryOp::Greater => "greater",
-            BinaryOp::GreaterEqual => "greater_equal",
-            BinaryOp::Less => "less",
-            BinaryOp::LessEqual => "less_equal",
-            BinaryOp::Add => "add",
-            BinaryOp::Subtract => "subtract",
-            BinaryOp::Multiply => "multiply",
-            BinaryOp::Divide => "divide",
-            BinaryOp::Remainder => "remainder",
-        }
-    }
 }
 
 fn float_pair(left: &Value, right: &Value) -> Option<(f64, f64)> {
@@ -939,45 +886,34 @@ mod tests {
     }
 
     #[test]
-    fn let_mut_const_static_del_and_type() {
-        let env = env_after(
-            "let x = 1\n\
-             let mut y = 2\n\
-             mut y = 3\n\
-             const C = 4\n\
-             static S = 5\n\
-             type Id = int\n\
-             del x",
-        );
-
-        assert!(env.get_value("x").is_err());
-        assert_eq!(env.get_value("y").unwrap(), Value::Int(3));
-        assert_eq!(env.get_value("C").unwrap(), Value::Int(4));
-        assert_eq!(env.get_value("S").unwrap(), Value::Int(5));
-        assert_eq!(env.types.get("Id").map(String::as_str), Some("int"));
+    fn variables_are_created_by_assignment() {
+        let env = env_after("x = 1\nx = x + 2\ny = x * 10");
+        assert_eq!(env.get_value("x").unwrap(), Value::Int(3));
+        assert_eq!(env.get_value("y").unwrap(), Value::Int(30));
     }
 
     #[test]
-    fn redeclare_and_delete_rules() {
-        let mut env = Env::new();
-        run_with_env(&mut env, "let y = 1").unwrap();
+    fn unknown_variables_report_the_line() {
+        let error = error_of("a = 1\nb = missing + 1");
+        assert!(error.message.contains("unknown variable 'missing'"), "{error}");
+        assert_eq!(error.line, 2);
+    }
 
-        let error = run_with_env(&mut env, "let y = 2").unwrap_err();
-        assert!(error.message.contains("cannot redeclare"), "{error}");
+    #[test]
+    fn del_removes_a_name() {
+        let env = env_after("x = 1\ndel x");
+        assert!(env.get_value("x").is_err());
 
-        run_with_env(&mut env, "mut z = 1\nmut z = 2").unwrap();
-        assert_eq!(env.get_value("z").unwrap(), Value::Int(2));
-
-        let error = run_with_env(&mut env, "const C = 1\ndel C").unwrap_err();
-        assert!(error.message.contains("cannot delete"), "{error}");
+        let error = error_of("del nope");
+        assert!(error.message.contains("unknown variable 'nope'"), "{error}");
     }
 
     #[test]
     fn while_loop_accumulates() {
         let env = env_after(
-            "let mut sum = 0\n\
-             let mut i = 0\n\
-             while i less 5 {\n\
+            "sum = 0\n\
+             i = 0\n\
+             while i < 5 {\n\
              \x20   sum = sum + i\n\
              \x20   i = i + 1\n\
              }",
@@ -990,12 +926,12 @@ mod tests {
     #[test]
     fn loop_break_and_continue() {
         let env = env_after(
-            "let mut total = 0\n\
-             let mut i = 0\n\
+            "total = 0\n\
+             i = 0\n\
              loop {\n\
              \x20   i = i + 1\n\
-             \x20   if i is 3 { continue }\n\
-             \x20   if i greater 5 { break }\n\
+             \x20   if i == 3 { continue }\n\
+             \x20   if i > 5 { break }\n\
              \x20   total = total + i\n\
              }",
         );
@@ -1007,11 +943,11 @@ mod tests {
     #[test]
     fn for_loops_over_text_and_sets() {
         let env = env_after(
-            "let mut letters = 0\n\
+            "letters = 0\n\
              for ch in \"abc\" {\n\
              \x20   letters = letters + 1\n\
              }\n\
-             let mut seen = 0\n\
+             seen = 0\n\
              for n in hashset 7 {\n\
              \x20   seen = n\n\
              }",
@@ -1022,57 +958,90 @@ mod tests {
     }
 
     #[test]
-    fn blocks_have_their_own_scope() {
+    fn blocks_do_not_create_scopes() {
         let env = env_after(
-            "let x = 1\n\
-             if true {\n\
-             \x20   let x = 2\n\
-             \x20   console.println(x)\n\
+            "x = 1\n\
+             if True {\n\
+             \x20   x = 2\n\
+             \x20   inside = 3\n\
              }\n\
+             for n in \"ab\" { }\n\
              {\n\
-             \x20   let y = 3\n\
+             \x20   grouped = 4\n\
              }",
         );
 
-        assert_eq!(env.get_value("x").unwrap(), Value::Int(1));
-        assert!(env.get_value("y").is_err());
+        assert_eq!(env.get_value("x").unwrap(), Value::Int(2));
+        assert_eq!(env.get_value("inside").unwrap(), Value::Int(3));
+        assert_eq!(env.get_value("n").unwrap(), Value::Text("b".into()));
+        assert_eq!(env.get_value("grouped").unwrap(), Value::Int(4));
     }
 
     #[test]
-    fn if_else_picks_one_branch() {
+    fn if_elif_else_picks_one_branch() {
         let env = env_after(
-            "let mut label = \"\"\n\
-             let score = 7\n\
-             if score greater 5 {\n\
-             \x20   label = \"high\"\n\
+            "def label(score) {\n\
+             \x20   if score >= 90 {\n\
+             \x20       return \"A\"\n\
+             \x20   }\n\
+             \x20   elif score >= 80 {\n\
+             \x20       return \"B\"\n\
+             \x20   } else {\n\
+             \x20       return \"C\"\n\
+             \x20   }\n\
+             }\n\
+             a = label(95)\n\
+             b = label(85)\n\
+             c = label(10)",
+        );
+
+        assert_eq!(env.get_value("a").unwrap(), Value::Text("A".into()));
+        assert_eq!(env.get_value("b").unwrap(), Value::Text("B".into()));
+        assert_eq!(env.get_value("c").unwrap(), Value::Text("C".into()));
+    }
+
+    #[test]
+    fn else_if_is_a_nested_condition() {
+        let env = env_after(
+            "score = 85\n\
+             grade = \"\"\n\
+             if score >= 90 {\n\
+             \x20   grade = \"A\"\n\
+             } else if score >= 80 {\n\
+             \x20   grade = \"B\"\n\
              } else {\n\
-             \x20   label = \"low\"\n\
+             \x20   grade = \"C\"\n\
              }",
         );
 
-        assert_eq!(env.get_value("label").unwrap(), Value::Text("high".into()));
+        assert_eq!(env.get_value("grade").unwrap(), Value::Text("B".into()));
     }
 
     #[test]
     fn operators_and_precedence() {
         let env = env_after(
-            "let arithmetic = 1 + 2 * 3\n\
-             let compare = 1 greater 2\n\
-             let logic = true and not false\n\
-             let text = \"a\" + \"b\"",
+            "arithmetic = 1 + 2 * 3\n\
+             compare = 1 > 2\n\
+             logic = True and not False\n\
+             text = \"a\" + \"b\"\n\
+             mixed = 1 == 1.0\n\
+             different = 1 != \"1\"",
         );
 
         assert_eq!(env.get_value("arithmetic").unwrap(), Value::Int(7));
         assert_eq!(env.get_value("compare").unwrap(), Value::Bool(false));
         assert_eq!(env.get_value("logic").unwrap(), Value::Bool(true));
         assert_eq!(env.get_value("text").unwrap(), Value::Text("ab".into()));
+        assert_eq!(env.get_value("mixed").unwrap(), Value::Bool(true));
+        assert_eq!(env.get_value("different").unwrap(), Value::Bool(true));
     }
 
     #[test]
-    fn assignment_to_const_is_rejected() {
-        let error = error_of("const C = 1\nC = 2");
-        assert!(error.message.contains("cannot assign to const"), "{error}");
-        assert_eq!(error.line, 2);
+    fn none_is_a_value() {
+        let env = env_after("a = None\nb = None == None\nc = None == 0");
+        assert_eq!(env.get_value("a").unwrap(), Value::None);
+        assert_eq!(env.get_value("b").unwrap(), Value::Bool(true));
+        assert_eq!(env.get_value("c").unwrap(), Value::Bool(false));
     }
 
     #[test]
@@ -1084,7 +1053,7 @@ mod tests {
 
     #[test]
     fn division_by_zero_reports_the_line() {
-        let error = error_of("let a = 1\nlet b = a / 0");
+        let error = error_of("a = 1\nb = a / 0");
         assert!(error.message.contains("division by zero"), "{error}");
         assert_eq!(error.line, 2);
     }
@@ -1092,8 +1061,8 @@ mod tests {
     #[test]
     fn hashset_and_matrix_still_work() {
         let env = env_after(
-            "let nums = hashset 1 2 2\n\
-             let grid = matrix row1 { a 1 b 2 } row2 { a 3 }",
+            "nums = hashset 1 2 2\n\
+             grid = matrix row1 { a 1 b 2 } row2 { a 3 }",
         );
 
         match env.get_value("nums").unwrap() {
@@ -1119,15 +1088,15 @@ mod tests {
     fn functions_support_parameters_defaults_and_recursion() {
         let env = env_after(
             "def fact(n) {\n\
-             \x20   if n less_equal 1 { return 1 }\n\
+             \x20   if n <= 1 { return 1 }\n\
              \x20   return n * fact(n - 1)\n\
              }\n\
              def greet(name, greeting = \"Hello\") {\n\
              \x20   return greeting + \", \" + name\n\
              }\n\
-             let result = fact(5)\n\
-             let message = greet(\"Nirab\")\n\
-             let short = greet(\"Nirab\", \"Hi\")",
+             result = fact(5)\n\
+             message = greet(\"Nirab\")\n\
+             short = greet(\"Nirab\", \"Hi\")",
         );
 
         assert_eq!(env.get_value("result").unwrap(), Value::Int(120));
@@ -1142,22 +1111,16 @@ mod tests {
     }
 
     #[test]
-    fn fn_is_an_alias_for_def() {
-        let env = env_after("fn double(x) { return x * 2 }\nlet value = double(21)");
-        assert_eq!(env.get_value("value").unwrap(), Value::Int(42));
-    }
-
-    #[test]
     fn return_leaves_loops_and_blocks() {
         let env = env_after(
             "def first_match(needle) {\n\
              \x20   for ch in \"abcdef\" {\n\
-             \x20       if ch is needle { return ch }\n\
+             \x20       if ch == needle { return ch }\n\
              \x20   }\n\
              \x20   return \"none\"\n\
              }\n\
-             let found = first_match(\"c\")\n\
-             let missing = first_match(\"z\")",
+             found = first_match(\"c\")\n\
+             missing = first_match(\"z\")",
         );
 
         assert_eq!(env.get_value("found").unwrap(), Value::Text("c".into()));
@@ -1168,21 +1131,23 @@ mod tests {
     }
 
     #[test]
-    fn function_locals_and_definitions_are_scoped() {
+    fn function_locals_stay_inside_the_call() {
         let env = env_after(
             "def outer() {\n\
-             \x20   let inner = 1\n\
+             \x20   inner = 1\n\
              \x20   return inner\n\
              }\n\
-             let ok = outer()\n\
-             if true {\n\
-             \x20   def hidden() { return 2 }\n\
-             }",
+             ok = outer()",
         );
 
         assert_eq!(env.get_value("ok").unwrap(), Value::Int(1));
         assert!(env.get_value("inner").is_err());
-        assert!(env.get_function("hidden").is_none());
+    }
+
+    #[test]
+    fn definitions_inside_blocks_survive() {
+        let env = env_after("if True {\n    def later() { return 2 }\n}\nv = later()");
+        assert_eq!(env.get_value("v").unwrap(), Value::Int(2));
     }
 
     #[test]
@@ -1199,22 +1164,27 @@ mod tests {
     }
 
     #[test]
-    fn void_is_returned_without_a_return_statement() {
-        let env = env_after("def do_nothing() { }\nlet result = do_nothing()");
-        assert_eq!(env.get_value("result").unwrap(), Value::Void);
+    fn functions_return_none_without_a_return_statement() {
+        let env = env_after("def do_nothing() { }\nresult = do_nothing()");
+        assert_eq!(env.get_value("result").unwrap(), Value::None);
+    }
+
+    #[test]
+    fn print_returns_none() {
+        let env = env_after("result = print(\"hello\", 1)");
+        assert_eq!(env.get_value("result").unwrap(), Value::None);
     }
 
     #[test]
     fn repl_environment_survives_between_inputs() {
         let mut env = Env::new();
 
-        run_with_env(&mut env, "let counter = 1").unwrap();
-        run_with_env(&mut env, "let copy = counter").unwrap();
-        run_with_env(&mut env, "const LIMIT = 10").unwrap();
+        run_with_env(&mut env, "counter = 1").unwrap();
+        run_with_env(&mut env, "copy = counter").unwrap();
+        run_with_env(&mut env, "counter = counter + 1").unwrap();
 
-        assert_eq!(env.get_value("counter").unwrap(), Value::Int(1));
+        assert_eq!(env.get_value("counter").unwrap(), Value::Int(2));
         assert_eq!(env.get_value("copy").unwrap(), Value::Int(1));
-        assert_eq!(env.get_value("LIMIT").unwrap(), Value::Int(10));
     }
 
     #[test]
@@ -1228,12 +1198,12 @@ mod tests {
 
     #[test]
     fn incomplete_input_waits_for_more() {
-        assert!(!input_is_complete("if true {"));
-        assert!(!input_is_complete("if true {\n    let a = 1\n"));
-        assert!(input_is_complete("if true {\n    let a = 1\n}"));
-        assert!(input_is_complete("let a = 1"));
+        assert!(!input_is_complete("if True {"));
+        assert!(!input_is_complete("if True {\n    a = 1\n"));
+        assert!(input_is_complete("if True {\n    a = 1\n}"));
+        assert!(input_is_complete("a = 1"));
         // Braces and quotes inside text must not start a continuation.
-        assert!(input_is_complete(r#"console.println("{")"#));
-        assert!(!input_is_complete(r#"let a = "unfinished"#));
+        assert!(input_is_complete(r#"print("{")"#));
+        assert!(!input_is_complete(r#"a = "unfinished"#));
     }
 }

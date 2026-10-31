@@ -1,31 +1,3 @@
-/// How a binding may be used once declared.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum VarKind {
-    Let,
-    Mut,
-    Const,
-    Static,
-}
-
-impl VarKind {
-    pub fn name(self) -> &'static str {
-        match self {
-            VarKind::Let => "let",
-            VarKind::Mut => "mut",
-            VarKind::Const => "const",
-            VarKind::Static => "static",
-        }
-    }
-
-    pub fn can_reassign(self) -> bool {
-        matches!(self, VarKind::Mut)
-    }
-
-    pub fn can_delete(self) -> bool {
-        matches!(self, VarKind::Let | VarKind::Mut)
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum UnaryOp {
     Not,
@@ -36,8 +8,8 @@ pub enum UnaryOp {
 pub enum BinaryOp {
     Or,
     And,
-    Is,
-    IsNot,
+    Equal,
+    NotEqual,
     Greater,
     GreaterEqual,
     Less,
@@ -69,6 +41,7 @@ pub enum Expr {
     Int(i64),
     Float(f64),
     Bool(bool),
+    None,
     Text(String),
     Var(String),
     HashSet(Vec<Expr>),
@@ -90,21 +63,13 @@ pub enum Expr {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum StmtKind {
-    Declare {
-        kind: VarKind,
-        name: String,
-        value: Expr,
-    },
+    /// `name = value`: creates the name, or updates the nearest existing one.
     Assign {
         name: String,
         value: Expr,
     },
     Delete {
         name: String,
-    },
-    TypeAlias {
-        name: String,
-        target: String,
     },
     Function {
         name: String,
