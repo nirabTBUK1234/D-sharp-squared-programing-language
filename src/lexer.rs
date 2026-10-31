@@ -51,6 +51,9 @@ pub enum TokenKind {
     False,
     Hashset,
     Matrix,
+    Def,
+    Fn,
+    Return,
 
     // literals
     Identifier(String),
@@ -253,6 +256,9 @@ fn keyword(word: &str) -> TokenKind {
         "continue" => TokenKind::Continue,
         "true" => TokenKind::True,
         "false" => TokenKind::False,
+        "def" => TokenKind::Def,
+        "fn" => TokenKind::Fn,
+        "return" => TokenKind::Return,
         "hashset" | "set" => TokenKind::Hashset,
         "matrix" | "matrex" => TokenKind::Matrix,
         "and" => TokenKind::And,

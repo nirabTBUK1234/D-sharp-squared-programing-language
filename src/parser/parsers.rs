@@ -1,6 +1,8 @@
 use crate::error::Error;
 use crate::lexer::{Token, TokenKind, lex};
-use crate::parser::ast::{BinaryOp, Expr, Stmt, StmtKind, UnaryOp, VarKind};
+use crate::parser::ast::{
+    BinaryOp, Callee, Expr, Parameter, Stmt, StmtKind, UnaryOp, VarKind,
+};
 
 pub struct Parser {
     tokens: Vec<Token>,
@@ -68,6 +70,14 @@ impl Parser {
                     kind: StmtKind::TypeAlias { name, target },
                     line,
                 })
+            }
+            TokenKind::Def | TokenKind::Fn => {
+                self.advance();
+                self.function_statement(line)
+            }
+            TokenKind::Return => {
+                self.advance();
+                self.return_statement(line)
             }
             TokenKind::If => {
                 self.advance();
@@ -137,6 +147,84 @@ impl Parser {
 
         Ok(Stmt {
             kind: StmtKind::Declare { kind, name, value },
+            line,
+        })
+    }
+
+    fn function_statement(&mut self, line: usize) -> Result<Stmt, Error> {
+        let name = self.consume_identifier("expected a function name")?;
+        self.consume(
+            &TokenKind::LeftParen,
+            "expected '(' after the function name",
+        )?;
+        let params = self.parameters()?;
+        let body = self.block()?;
+
+        Ok(Stmt {
+            kind: StmtKind::Function { name, params, body },
+            line,
+        })
+    }
+
+    fn parameters(&mut self) -> Result<Vec<Parameter>, Error> {
+        let mut params: Vec<Parameter> = Vec::new();
+        let mut seen_default = false;
+
+        self.skip_newlines();
+        if self.match_kind(&TokenKind::RightParen) {
+            return Ok(params);
+        }
+
+        loop {
+            let param_line = self.peek().line;
+            let name = self.consume_identifier("expected a parameter name")?;
+
+            let default = if self.match_kind(&TokenKind::Assign) {
+                Some(self.expression()?)
+            } else {
+                None
+            };
+
+            if default.is_none() && seen_default {
+                return Err(Error::new(
+                    param_line,
+                    format!(
+                        "parameter '{name}' without a default cannot follow one with a default"
+                    ),
+                ));
+            }
+            seen_default |= default.is_some();
+
+            params.push(Parameter { name, default });
+
+            self.skip_newlines();
+            if self.match_kind(&TokenKind::Comma) {
+                self.skip_newlines();
+                continue;
+            }
+            break;
+        }
+
+        self.consume(
+            &TokenKind::RightParen,
+            "expected ')' to close the parameter list",
+        )?;
+        Ok(params)
+    }
+
+    fn return_statement(&mut self, line: usize) -> Result<Stmt, Error> {
+        let value = if self.check(&TokenKind::Newline)
+            || self.check(&TokenKind::Semicolon)
+            || self.check(&TokenKind::RightBrace)
+            || self.check(&TokenKind::Eof)
+        {
+            None
+        } else {
+            Some(self.expression()?)
+        };
+
+        Ok(Stmt {
+            kind: StmtKind::Return(value),
             line,
         })
     }
@@ -384,8 +472,18 @@ impl Parser {
                     self.consume(&TokenKind::LeftParen, "expected '(' after the method name")?;
                     let args = self.arguments()?;
                     return Ok(Expr::Call {
-                        receiver: name,
-                        method,
+                        callee: Callee::Method {
+                            receiver: name,
+                            method,
+                        },
+                        args,
+                    });
+                }
+
+                if self.match_kind(&TokenKind::LeftParen) {
+                    let args = self.arguments()?;
+                    return Ok(Expr::Call {
+                        callee: Callee::Function(name),
                         args,
                     });
                 }

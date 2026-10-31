@@ -50,6 +50,21 @@ pub enum BinaryOp {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct Parameter {
+    pub name: String,
+    pub default: Option<Expr>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Callee {
+    Function(String),
+    Method {
+        receiver: String,
+        method: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
     Int(i64),
     Float(f64),
@@ -59,8 +74,7 @@ pub enum Expr {
     HashSet(Vec<Expr>),
     Matrix(Vec<(String, Vec<(String, Expr)>)>),
     Call {
-        receiver: String,
-        method: String,
+        callee: Callee,
         args: Vec<Expr>,
     },
     Unary {
@@ -92,6 +106,12 @@ pub enum StmtKind {
         name: String,
         target: String,
     },
+    Function {
+        name: String,
+        params: Vec<Parameter>,
+        body: Vec<Stmt>,
+    },
+    Return(Option<Expr>),
     If {
         condition: Expr,
         then_branch: Vec<Stmt>,

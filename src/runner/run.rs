@@ -3,10 +3,11 @@ use std::{
     error::Error as StdError,
     fs,
     io::{self, BufRead, Write},
+    rc::Rc,
 };
 
 use crate::error::Error;
-use crate::parser::ast::{BinaryOp, Expr, Stmt, StmtKind, UnaryOp, VarKind};
+use crate::parser::ast::{BinaryOp, Callee, Expr, Parameter, Stmt, StmtKind, UnaryOp, VarKind};
 use crate::parser::parsers::Parser;
 use crate::value::{SetItem, Value};
 
@@ -35,6 +36,7 @@ pub fn run_with_env(env: &mut Env, source: &str) -> Result<(), Error> {
 
 pub struct Env {
     scopes: Vec<HashMap<String, Variable>>,
+    functions: Vec<HashMap<String, Rc<Function>>>,
     types: HashMap<String, String>,
 }
 
@@ -43,20 +45,43 @@ struct Variable {
     value: Value,
 }
 
+struct Function {
+    params: Vec<Parameter>,
+    body: Vec<Stmt>,
+}
+
 impl Env {
     pub fn new() -> Self {
         Env {
             scopes: vec![HashMap::new()],
+            functions: vec![HashMap::new()],
             types: HashMap::new(),
         }
     }
 
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
+        self.functions.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
+        self.functions.pop();
+    }
+
+    pub fn define_function(&mut self, name: String, params: Vec<Parameter>, body: Vec<Stmt>) {
+        let function = Rc::new(Function { params, body });
+        self.functions
+            .last_mut()
+            .expect("there is always a scope")
+            .insert(name, function);
+    }
+
+    fn get_function(&self, name: &str) -> Option<Rc<Function>> {
+        self.functions
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).cloned())
     }
 
     pub fn declare(&mut self, kind: VarKind, name: String, value: Value) -> Result<(), String> {
@@ -138,21 +163,27 @@ impl Env {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum Flow {
     Normal,
     Break,
     Continue,
+    Return(Value),
 }
 
 struct Interpreter<'a> {
     env: &'a mut Env,
     loop_depth: usize,
+    function_depth: usize,
 }
 
 impl<'a> Interpreter<'a> {
     fn new(env: &'a mut Env) -> Self {
-        Interpreter { env, loop_depth: 0 }
+        Interpreter {
+            env,
+            loop_depth: 0,
+            function_depth: 0,
+        }
     }
 
     fn run(&mut self, statements: &[Stmt]) -> Result<(), Error> {
@@ -208,6 +239,23 @@ impl<'a> Interpreter<'a> {
                     .map_err(|message| Error::new(line, message))?;
                 Ok(Flow::Normal)
             }
+            StmtKind::Function { name, params, body } => {
+                self.env
+                    .define_function(name.clone(), params.clone(), body.clone());
+                Ok(Flow::Normal)
+            }
+            StmtKind::Return(value) => {
+                if self.function_depth == 0 {
+                    return Err(Error::new(line, "'return' outside of a function"));
+                }
+
+                let value = match value {
+                    Some(expr) => self.eval(expr, line)?,
+                    None => Value::Void,
+                };
+
+                Ok(Flow::Return(value))
+            }
             StmtKind::If {
                 condition,
                 then_branch,
@@ -225,6 +273,7 @@ impl<'a> Interpreter<'a> {
                 while self.eval_condition(condition, line)? {
                     match self.exec_loop_body(body)? {
                         Flow::Break => break,
+                        Flow::Return(value) => return Ok(Flow::Return(value)),
                         Flow::Continue | Flow::Normal => {}
                     }
                 }
@@ -234,6 +283,7 @@ impl<'a> Interpreter<'a> {
                 loop {
                     match self.exec_loop_body(body)? {
                         Flow::Break => break,
+                        Flow::Return(value) => return Ok(Flow::Return(value)),
                         Flow::Continue | Flow::Normal => {}
                     }
                 }
@@ -258,6 +308,7 @@ impl<'a> Interpreter<'a> {
 
                     match flow? {
                         Flow::Break => break,
+                        Flow::Return(value) => return Ok(Flow::Return(value)),
                         Flow::Continue | Flow::Normal => {}
                     }
                 }
@@ -370,20 +421,112 @@ impl<'a> Interpreter<'a> {
                 let right_value = self.eval(right, line)?;
                 binary_op(*op, left_value, right_value, line)
             }
-            Expr::Call {
-                receiver,
-                method,
-                args,
-            } => {
+            Expr::Call { callee, args } => {
                 let mut values = Vec::with_capacity(args.len());
 
                 for arg in args {
                     values.push(self.eval(arg, line)?);
                 }
 
-                call_builtin(receiver, method, &values, line)
+                match callee {
+                    Callee::Method { receiver, method } => {
+                        call_builtin(receiver, method, &values, line)
+                    }
+                    Callee::Function(name) => self.call_function(name, values, line),
+                }
             }
         }
+    }
+
+    fn call_function(
+        &mut self,
+        name: &str,
+        values: Vec<Value>,
+        line: usize,
+    ) -> Result<Value, Error> {
+        let Some(function) = self.env.get_function(name) else {
+            return Err(Error::new(line, format!("unknown function '{name}'")));
+        };
+
+        let required = function
+            .params
+            .iter()
+            .filter(|param| param.default.is_none())
+            .count();
+        let maximum = function.params.len();
+
+        if values.len() < required || values.len() > maximum {
+            let expected = if required == maximum {
+                format!("{required}")
+            } else {
+                format!("between {required} and {maximum}")
+            };
+
+            return Err(Error::new(
+                line,
+                format!(
+                    "function '{name}' takes {expected} argument(s), but {} given",
+                    values.len()
+                ),
+            ));
+        }
+
+        self.env.push_scope();
+
+        let result = match self.bind_parameters(&function, values, line) {
+            Ok(()) => {
+                let loop_depth = std::mem::replace(&mut self.loop_depth, 0);
+                self.function_depth += 1;
+
+                let flow = self.exec_statements(&function.body);
+
+                self.loop_depth = loop_depth;
+                self.function_depth -= 1;
+
+                match flow? {
+                    Flow::Return(value) => Ok(value),
+                    Flow::Normal => Ok(Value::Void),
+                    Flow::Break | Flow::Continue => Err(Error::new(
+                        line,
+                        "'break' or 'continue' escaped a function body",
+                    )),
+                }
+            }
+            Err(error) => Err(error),
+        };
+
+        self.env.pop_scope();
+        result
+    }
+
+    fn bind_parameters(
+        &mut self,
+        function: &Function,
+        values: Vec<Value>,
+        line: usize,
+    ) -> Result<(), Error> {
+        let mut values = values.into_iter();
+
+        for param in &function.params {
+            let value = match values.next() {
+                Some(value) => value,
+                None => match &param.default {
+                    Some(default) => self.eval(default, line)?,
+                    None => {
+                        return Err(Error::new(
+                            line,
+                            format!("missing argument '{}'", param.name),
+                        ));
+                    }
+                },
+            };
+
+            self.env
+                .declare(VarKind::Let, param.name.clone(), value)
+                .map_err(|message| Error::new(line, message))?;
+        }
+
+        Ok(())
     }
 }
 
@@ -970,6 +1113,95 @@ mod tests {
             }
             other => panic!("expected matrix, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn functions_support_parameters_defaults_and_recursion() {
+        let env = env_after(
+            "def fact(n) {\n\
+             \x20   if n less_equal 1 { return 1 }\n\
+             \x20   return n * fact(n - 1)\n\
+             }\n\
+             def greet(name, greeting = \"Hello\") {\n\
+             \x20   return greeting + \", \" + name\n\
+             }\n\
+             let result = fact(5)\n\
+             let message = greet(\"Nirab\")\n\
+             let short = greet(\"Nirab\", \"Hi\")",
+        );
+
+        assert_eq!(env.get_value("result").unwrap(), Value::Int(120));
+        assert_eq!(
+            env.get_value("message").unwrap(),
+            Value::Text("Hello, Nirab".into())
+        );
+        assert_eq!(
+            env.get_value("short").unwrap(),
+            Value::Text("Hi, Nirab".into())
+        );
+    }
+
+    #[test]
+    fn fn_is_an_alias_for_def() {
+        let env = env_after("fn double(x) { return x * 2 }\nlet value = double(21)");
+        assert_eq!(env.get_value("value").unwrap(), Value::Int(42));
+    }
+
+    #[test]
+    fn return_leaves_loops_and_blocks() {
+        let env = env_after(
+            "def first_match(needle) {\n\
+             \x20   for ch in \"abcdef\" {\n\
+             \x20       if ch is needle { return ch }\n\
+             \x20   }\n\
+             \x20   return \"none\"\n\
+             }\n\
+             let found = first_match(\"c\")\n\
+             let missing = first_match(\"z\")",
+        );
+
+        assert_eq!(env.get_value("found").unwrap(), Value::Text("c".into()));
+        assert_eq!(
+            env.get_value("missing").unwrap(),
+            Value::Text("none".into())
+        );
+    }
+
+    #[test]
+    fn function_locals_and_definitions_are_scoped() {
+        let env = env_after(
+            "def outer() {\n\
+             \x20   let inner = 1\n\
+             \x20   return inner\n\
+             }\n\
+             let ok = outer()\n\
+             if true {\n\
+             \x20   def hidden() { return 2 }\n\
+             }",
+        );
+
+        assert_eq!(env.get_value("ok").unwrap(), Value::Int(1));
+        assert!(env.get_value("inner").is_err());
+        assert!(env.get_function("hidden").is_none());
+    }
+
+    #[test]
+    fn function_errors_point_at_the_call() {
+        let error = error_of("def f(a, b) { return a }\n\nf(1)");
+        assert!(error.message.contains("takes 2 argument(s)"), "{error}");
+        assert_eq!(error.line, 3);
+
+        let error = error_of("nope(1)");
+        assert!(error.message.contains("unknown function 'nope'"), "{error}");
+
+        let error = error_of("return 1");
+        assert!(error.message.contains("'return' outside"), "{error}");
+    }
+
+    #[test]
+    fn void_is_returned_without_a_return_statement() {
+        let env = env_after("def do_nothing() { }\nlet result = do_nothing()");
+        assert_eq!(env.get_value("result").unwrap(), Value::Void);
     }
 
     #[test]
