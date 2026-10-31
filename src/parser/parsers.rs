@@ -1,438 +1,643 @@
-use std::collections::{HashMap, HashSet};
+use crate::error::Error;
+use crate::lexer::{Token, TokenKind, lex};
+use crate::parser::ast::{BinaryOp, Expr, Stmt, StmtKind, UnaryOp, VarKind};
 
-use crate::runner::run::{Env, read_input};
-use crate::value::{SetItem, Value};
-
-/// A parsed `console.<method>(...)` call. The arguments are still raw tokens;
-/// the runner turns them into values so that lookups and I/O stay in one place.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ConsoleCall {
-    pub method: String,
-    pub args: Vec<String>,
+pub struct Parser {
+    tokens: Vec<Token>,
+    current: usize,
 }
 
-pub fn parse_line(line: &str) -> Vec<String> {
-    let mut words: Vec<String> = Vec::new();
-    let mut current_word = String::new();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
+impl Parser {
+    pub fn parse(source: &str) -> Result<Vec<Stmt>, Error> {
+        let tokens = lex(source)?;
+        let mut parser = Parser { tokens, current: 0 };
+        parser.program()
+    }
 
-    for ch in line.chars() {
-        // Everything inside a quoted text literal is part of the same word,
-        // spaces and `;` included.
-        if let Some(open) = quote {
-            current_word.push(ch);
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' && open == '"' {
-                escaped = true;
-            } else if ch == open {
-                quote = None;
-            }
-            continue;
+    fn program(&mut self) -> Result<Vec<Stmt>, Error> {
+        self.skip_separators();
+
+        let mut statements: Vec<Stmt> = Vec::new();
+        while !self.check(&TokenKind::Eof) {
+            statements.push(self.statement()?);
+            self.skip_separators();
         }
 
-        match ch {
-            // `;` and Newline ends the line, unless inside text.
-            ';' | '\n' => break,
-            '"' | '\'' => {
-                quote = Some(ch);
-                current_word.push(ch);
+        Ok(statements)
+    }
+
+    fn statement(&mut self) -> Result<Stmt, Error> {
+        let line = self.peek().line;
+
+        match self.peek().kind.clone() {
+            TokenKind::Let => {
+                self.advance();
+                let kind = if self.match_kind(&TokenKind::Mut) {
+                    VarKind::Mut
+                } else {
+                    VarKind::Let
+                };
+                self.declaration(kind, line)
             }
-            ' ' | '\t' => {
-                // Finished a word. Skip extra spaces.
-                if !current_word.is_empty() {
-                    words.push(current_word);
-                    current_word = String::new();
+            TokenKind::Mut => {
+                self.advance();
+                self.declaration(VarKind::Mut, line)
+            }
+            TokenKind::Const => {
+                self.advance();
+                self.declaration(VarKind::Const, line)
+            }
+            TokenKind::Static => {
+                self.advance();
+                self.declaration(VarKind::Static, line)
+            }
+            TokenKind::Del => {
+                self.advance();
+                let name = self.consume_identifier("expected a name after 'del'")?;
+                Ok(Stmt {
+                    kind: StmtKind::Delete { name },
+                    line,
+                })
+            }
+            TokenKind::Type => {
+                self.advance();
+                let name = self.consume_identifier("expected a type name after 'type'")?;
+                self.consume(&TokenKind::Assign, "expected '=' after the type name")?;
+                let target = self.consume_identifier("expected a type name after '='")?;
+                Ok(Stmt {
+                    kind: StmtKind::TypeAlias { name, target },
+                    line,
+                })
+            }
+            TokenKind::If => {
+                self.advance();
+                self.if_statement(line)
+            }
+            TokenKind::While => {
+                self.advance();
+                let condition = self.expression()?;
+                let body = self.block()?;
+                Ok(Stmt {
+                    kind: StmtKind::While { condition, body },
+                    line,
+                })
+            }
+            TokenKind::Loop => {
+                self.advance();
+                let body = self.block()?;
+                Ok(Stmt {
+                    kind: StmtKind::Loop { body },
+                    line,
+                })
+            }
+            TokenKind::For => {
+                self.advance();
+                let name = self.consume_identifier("expected a loop variable after 'for'")?;
+                self.consume(&TokenKind::In, "expected 'in' after the loop variable")?;
+                let iterable = self.expression()?;
+                let body = self.block()?;
+                Ok(Stmt {
+                    kind: StmtKind::For {
+                        name,
+                        iterable,
+                        body,
+                    },
+                    line,
+                })
+            }
+            TokenKind::Break => {
+                self.advance();
+                Ok(Stmt {
+                    kind: StmtKind::Break,
+                    line,
+                })
+            }
+            TokenKind::Continue => {
+                self.advance();
+                Ok(Stmt {
+                    kind: StmtKind::Continue,
+                    line,
+                })
+            }
+            TokenKind::LeftBrace => {
+                let body = self.block()?;
+                Ok(Stmt {
+                    kind: StmtKind::Block(body),
+                    line,
+                })
+            }
+            _ => self.expression_statement(line),
+        }
+    }
+
+    fn declaration(&mut self, kind: VarKind, line: usize) -> Result<Stmt, Error> {
+        let name = self.consume_identifier("expected a variable name")?;
+        self.consume(&TokenKind::Assign, "expected '=' after the variable name")?;
+        let value = self.expression()?;
+
+        Ok(Stmt {
+            kind: StmtKind::Declare { kind, name, value },
+            line,
+        })
+    }
+
+    fn if_statement(&mut self, line: usize) -> Result<Stmt, Error> {
+        let condition = self.expression()?;
+        let then_branch = self.block()?;
+
+        let mut else_branch = None;
+        if self.match_kind(&TokenKind::Else) {
+            if self.check(&TokenKind::If) {
+                let nested = self.statement()?;
+                else_branch = Some(vec![nested]);
+            } else {
+                else_branch = Some(self.block()?);
+            }
+        }
+
+        Ok(Stmt {
+            kind: StmtKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            },
+            line,
+        })
+    }
+
+    fn expression_statement(&mut self, line: usize) -> Result<Stmt, Error> {
+        let expr = self.expression()?;
+
+        if self.match_kind(&TokenKind::Assign) {
+            let Expr::Var(name) = expr else {
+                return Err(Error::new(line, "only a variable can be assigned to"));
+            };
+            let value = self.expression()?;
+            return Ok(Stmt {
+                kind: StmtKind::Assign { name, value },
+                line,
+            });
+        }
+
+        Ok(Stmt {
+            kind: StmtKind::Expression(expr),
+            line,
+        })
+    }
+
+    fn block(&mut self) -> Result<Vec<Stmt>, Error> {
+        self.skip_newlines();
+        self.consume(&TokenKind::LeftBrace, "expected '{' to start a block")?;
+        self.skip_separators();
+
+        let mut statements: Vec<Stmt> = Vec::new();
+        while !self.check(&TokenKind::RightBrace) && !self.check(&TokenKind::Eof) {
+            statements.push(self.statement()?);
+            self.skip_separators();
+        }
+
+        self.consume(&TokenKind::RightBrace, "expected '}' to close the block")?;
+        Ok(statements)
+    }
+
+    fn expression(&mut self) -> Result<Expr, Error> {
+        self.or_expression()
+    }
+
+    fn or_expression(&mut self) -> Result<Expr, Error> {
+        let mut left = self.and_expression()?;
+
+        while self.match_kind(&TokenKind::Or) {
+            let right = self.and_expression()?;
+            left = Expr::Binary {
+                op: BinaryOp::Or,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+        }
+
+        Ok(left)
+    }
+
+    fn and_expression(&mut self) -> Result<Expr, Error> {
+        let mut left = self.equality_expression()?;
+
+        while self.match_kind(&TokenKind::And) {
+            let right = self.equality_expression()?;
+            left = Expr::Binary {
+                op: BinaryOp::And,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+        }
+
+        Ok(left)
+    }
+
+    fn equality_expression(&mut self) -> Result<Expr, Error> {
+        let mut left = self.comparison_expression()?;
+
+        loop {
+            let op = if self.match_kind(&TokenKind::Is) {
+                BinaryOp::Is
+            } else if self.match_kind(&TokenKind::IsNot) {
+                BinaryOp::IsNot
+            } else {
+                break;
+            };
+
+            let right = self.comparison_expression()?;
+            left = Expr::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+        }
+
+        Ok(left)
+    }
+
+    fn comparison_expression(&mut self) -> Result<Expr, Error> {
+        let mut left = self.additive_expression()?;
+
+        loop {
+            let op = if self.match_kind(&TokenKind::Greater) {
+                BinaryOp::Greater
+            } else if self.match_kind(&TokenKind::GreaterEqual) {
+                BinaryOp::GreaterEqual
+            } else if self.match_kind(&TokenKind::Less) {
+                BinaryOp::Less
+            } else if self.match_kind(&TokenKind::LessEqual) {
+                BinaryOp::LessEqual
+            } else {
+                break;
+            };
+
+            let right = self.additive_expression()?;
+            left = Expr::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+        }
+
+        Ok(left)
+    }
+
+    fn additive_expression(&mut self) -> Result<Expr, Error> {
+        let mut left = self.multiplicative_expression()?;
+
+        loop {
+            let op = if self.match_kind(&TokenKind::Plus) {
+                BinaryOp::Add
+            } else if self.match_kind(&TokenKind::Minus) {
+                BinaryOp::Subtract
+            } else {
+                break;
+            };
+
+            let right = self.multiplicative_expression()?;
+            left = Expr::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+        }
+
+        Ok(left)
+    }
+
+    fn multiplicative_expression(&mut self) -> Result<Expr, Error> {
+        let mut left = self.unary_expression()?;
+
+        loop {
+            let op = if self.match_kind(&TokenKind::Star) {
+                BinaryOp::Multiply
+            } else if self.match_kind(&TokenKind::Slash) {
+                BinaryOp::Divide
+            } else if self.match_kind(&TokenKind::Percent) {
+                BinaryOp::Remainder
+            } else {
+                break;
+            };
+
+            let right = self.unary_expression()?;
+            left = Expr::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+        }
+
+        Ok(left)
+    }
+
+    fn unary_expression(&mut self) -> Result<Expr, Error> {
+        if self.match_kind(&TokenKind::Not) {
+            let expr = self.unary_expression()?;
+            return Ok(Expr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(expr),
+            });
+        }
+
+        if self.match_kind(&TokenKind::Minus) {
+            let expr = self.unary_expression()?;
+            return Ok(Expr::Unary {
+                op: UnaryOp::Neg,
+                expr: Box::new(expr),
+            });
+        }
+
+        self.primary_expression()
+    }
+
+    fn primary_expression(&mut self) -> Result<Expr, Error> {
+        let line = self.peek().line;
+
+        match self.peek().kind.clone() {
+            TokenKind::Int(number) => {
+                self.advance();
+                Ok(Expr::Int(number))
+            }
+            TokenKind::Float(number) => {
+                self.advance();
+                Ok(Expr::Float(number))
+            }
+            TokenKind::True => {
+                self.advance();
+                Ok(Expr::Bool(true))
+            }
+            TokenKind::False => {
+                self.advance();
+                Ok(Expr::Bool(false))
+            }
+            TokenKind::Text(text) => {
+                self.advance();
+                Ok(Expr::Text(text))
+            }
+            TokenKind::Identifier(name) => {
+                self.advance();
+
+                if self.match_kind(&TokenKind::Dot) {
+                    let method = self.consume_identifier("expected a method name after '.'")?;
+                    self.consume(&TokenKind::LeftParen, "expected '(' after the method name")?;
+                    let args = self.arguments()?;
+                    return Ok(Expr::Call {
+                        receiver: name,
+                        method,
+                        args,
+                    });
                 }
+
+                Ok(Expr::Var(name))
             }
-            _ => current_word.push(ch),
+            TokenKind::Hashset => {
+                self.advance();
+                self.hashset_literal()
+            }
+            TokenKind::Matrix => {
+                self.advance();
+                self.matrix_literal()
+            }
+            TokenKind::LeftParen => {
+                self.advance();
+                let expr = self.expression()?;
+                self.consume(&TokenKind::RightParen, "expected ')'")?;
+                Ok(expr)
+            }
+            other => Err(Error::new(
+                line,
+                format!("expected a value, found {}", describe(&other)),
+            )),
         }
     }
 
-    // The last word has no space after it, so save it too.
-    if !current_word.is_empty() {
-        words.push(current_word);
-    }
+    fn arguments(&mut self) -> Result<Vec<Expr>, Error> {
+        let mut args: Vec<Expr> = Vec::new();
 
-    words
-}
-
-/// Splits one source line into statements on `;`, ignoring `;` inside text.
-fn split_statements(line: &str) -> Vec<&str> {
-    let mut parts: Vec<&str> = Vec::new();
-    let mut start = 0;
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-
-    for (idx, ch) in line.char_indices() {
-        if let Some(open) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' && open == '"' {
-                escaped = true;
-            } else if ch == open {
-                quote = None;
-            }
-            continue;
+        self.skip_newlines();
+        if self.match_kind(&TokenKind::RightParen) {
+            return Ok(args);
         }
 
-        match ch {
-            '"' | '\'' => quote = Some(ch),
-            ';' => {
-                parts.push(&line[start..idx]);
-                start = idx + 1;
-            }
-            _ => {}
-        }
-    }
+        loop {
+            args.push(self.expression()?);
+            self.skip_newlines();
 
-    parts.push(&line[start..]);
-    parts
-}
-
-/// Returns every statement with the source line it came from, so errors can
-/// point the user at the right place.
-pub fn parse_prompt(prompt: &str) -> Vec<(usize, Vec<String>)> {
-    let mut parsed_prompt: Vec<(usize, Vec<String>)> = Vec::new();
-
-    for (idx, line) in prompt.lines().enumerate() {
-        let line_number = idx + 1;
-        for statement in split_statements(line) {
-            if statement.trim().is_empty() {
+            if self.match_kind(&TokenKind::Comma) {
+                self.skip_newlines();
                 continue;
             }
-            let words = parse_line(statement);
-            if !words.is_empty() {
-                parsed_prompt.push((line_number, words));
+            break;
+        }
+
+        self.consume(
+            &TokenKind::RightParen,
+            "expected ')' to close the argument list",
+        )?;
+        Ok(args)
+    }
+
+    fn hashset_literal(&mut self) -> Result<Expr, Error> {
+        let mut items: Vec<Expr> = Vec::new();
+
+        while self.starts_value() {
+            items.push(self.expression()?);
+        }
+
+        Ok(Expr::HashSet(items))
+    }
+
+    fn matrix_literal(&mut self) -> Result<Expr, Error> {
+        let mut rows: Vec<(String, Vec<(String, Expr)>)> = Vec::new();
+
+        while let TokenKind::Identifier(name) = self.peek().kind.clone() {
+            self.advance();
+            self.consume(
+                &TokenKind::LeftBrace,
+                "expected '{' after the matrix row name",
+            )?;
+
+            let mut cells: Vec<(String, Expr)> = Vec::new();
+            while let TokenKind::Identifier(key) = self.peek().kind.clone() {
+                self.advance();
+                let value = self.expression()?;
+                cells.push((key, value));
             }
+
+            self.consume(&TokenKind::RightBrace, "expected '}' to close the matrix row")?;
+            rows.push((name, cells));
+        }
+
+        Ok(Expr::Matrix(rows))
+    }
+
+    fn starts_value(&self) -> bool {
+        matches!(
+            &self.peek().kind,
+            TokenKind::Int(_)
+                | TokenKind::Float(_)
+                | TokenKind::Text(_)
+                | TokenKind::True
+                | TokenKind::False
+                | TokenKind::Identifier(_)
+                | TokenKind::LeftParen
+                | TokenKind::Minus
+                | TokenKind::Not
+                | TokenKind::Hashset
+                | TokenKind::Matrix
+        )
+    }
+
+    fn peek(&self) -> &Token {
+        &self.tokens[self.current]
+    }
+
+    fn advance(&mut self) -> &Token {
+        if self.current < self.tokens.len() - 1 {
+            self.current += 1;
+        }
+        &self.tokens[self.current - 1]
+    }
+
+    fn check(&self, kind: &TokenKind) -> bool {
+        std::mem::discriminant(&self.peek().kind) == std::mem::discriminant(kind)
+    }
+
+    fn match_kind(&mut self, kind: &TokenKind) -> bool {
+        if self.check(kind) {
+            self.advance();
+            true
+        } else {
+            false
         }
     }
 
-    parsed_prompt
-}
-
-/// Recognises `console.<method>(args...)`.
-///
-/// `Ok(None)` means "this is not a console call", `Err` means it looks like one
-/// but is malformed.
-pub fn parse_console_call(line: &[String]) -> Result<Option<ConsoleCall>, String> {
-    let text = line.join(" ");
-
-    let Some(rest) = text.strip_prefix("console.") else {
-        if text == "console" || text.starts_with("console ") {
-            return Err("console is not a value: use console.<method>(...)".to_string());
+    fn consume(&mut self, kind: &TokenKind, message: &str) -> Result<Token, Error> {
+        if self.check(kind) {
+            return Ok(self.advance().clone());
         }
-        return Ok(None);
-    };
-
-    let Some(open) = rest.find('(') else {
-        return Err(format!(
-            "expected '(' after the console method name, got 'console.{rest}'"
-        ));
-    };
-
-    let method = &rest[..open];
-    if method.is_empty() || !is_name(method) {
-        return Err(format!("'console.{method}' is not a valid method name"));
+        Err(Error::new(self.peek().line, message))
     }
 
-    let Some(close) = rest.rfind(')') else {
-        return Err(format!(
-            "console.{method}(...) is missing its closing ')'"
-        ));
-    };
-
-    if close != rest.len() - 1 {
-        return Err(format!(
-            "unexpected text after console.{method}(...): '{}'",
-            &rest[close + 1..].trim()
-        ));
-    }
-
-    let mut args: Vec<String> = Vec::new();
-    let args_text = &rest[open + 1..close];
-    if !args_text.trim().is_empty() {
-        for arg in split_args(args_text) {
-            let arg = arg.trim();
-            if arg.is_empty() {
-                return Err(format!("console.{method}() has an empty argument"));
+    fn consume_identifier(&mut self, message: &str) -> Result<String, Error> {
+        match self.peek().kind.clone() {
+            TokenKind::Identifier(name) => {
+                self.advance();
+                Ok(name)
             }
-            if !is_single_value(arg) {
-                return Err(format!(
-                    "console.{method}() expects one value per argument, got '{arg}'"
-                ));
-            }
-            args.push(arg.to_string());
+            other => Err(Error::new(
+                self.peek().line,
+                format!("{message}, found {}", describe(&other)),
+            )),
         }
     }
 
-    Ok(Some(ConsoleCall {
-        method: method.to_string(),
-        args,
-    }))
-}
-
-/// Splits an argument list on commas that are outside text literals, so
-/// `console.println("Hello, world!")` stays a single argument.
-fn split_args(text: &str) -> Vec<&str> {
-    let mut args: Vec<&str> = Vec::new();
-    let mut start = 0;
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-
-    for (idx, ch) in text.char_indices() {
-        if let Some(open) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' && open == '"' {
-                escaped = true;
-            } else if ch == open {
-                quote = None;
-            }
-            continue;
-        }
-
-        match ch {
-            '"' | '\'' => quote = Some(ch),
-            ',' => {
-                args.push(&text[start..idx]);
-                start = idx + 1;
-            }
-            _ => {}
+    fn skip_separators(&mut self) {
+        while self.check(&TokenKind::Semicolon) || self.check(&TokenKind::Newline) {
+            self.advance();
         }
     }
 
-    args.push(&text[start..]);
-    args
-}
-
-fn is_single_value(text: &str) -> bool {
-    if text.len() >= 2 {
-        let bytes = text.as_bytes();
-        if (bytes[0] == b'"' || bytes[0] == b'\'') && bytes[bytes.len() - 1] == bytes[0] {
-            return true;
+    fn skip_newlines(&mut self) {
+        while self.check(&TokenKind::Newline) {
+            self.advance();
         }
     }
-    !text.chars().any(char::is_whitespace)
 }
 
-fn find_val_in_compound_data_type<I, T>(compound_data_type: I, target: T) -> Vec<usize>
-where
-    I: IntoIterator,
-    I::Item: PartialEq<T>,
-    T: Copy,
-{
-    let mut indices: Vec<usize> = Vec::new();
-
-    for (idx, val) in compound_data_type.into_iter().enumerate() {
-        if val == target {
-            indices.push(idx);
-        }
+fn describe(kind: &TokenKind) -> String {
+    match kind {
+        TokenKind::Identifier(name) => format!("'{name}'"),
+        TokenKind::Int(number) => format!("'{number}'"),
+        TokenKind::Float(number) => format!("'{number}'"),
+        TokenKind::Text(text) => format!("'{text}'"),
+        TokenKind::Eof => "end of input".to_string(),
+        TokenKind::Newline => "end of line".to_string(),
+        other => format!("'{other:?}'"),
     }
-
-    indices
-}
-
-pub(crate) fn is_name(word: &str) -> bool {
-    let mut chars = word.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
-        _ => return false,
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
-pub(crate) fn parse_value(token: &str, env: &Env) -> Result<Value, String> {
-    if token == "true" {
-        return Ok(Value::Bool(true));
-    }
-    if token == "false" {
-        return Ok(Value::Bool(false));
-    }
-    if token == "hashset" || token == "set" {
-        return Ok(Value::HashSet(HashSet::new()));
-    }
-    if token == "matrix" || token == "matrex" {
-        return Ok(Value::Matrix(HashMap::new()));
-    }
-    if token == "console.input()" {
-        return read_input();
-    }
-    if let Ok(number) = token.parse::<i64>() {
-        return Ok(Value::Int(number));
-    }
-    if let Ok(number) = token.parse::<f64>() {
-        return Ok(Value::Float(number));
-    }
-
-    let mut chars = token.chars();
-    if let Some(open) = chars.next() {
-        if open == '"' || open == '\'' {
-            if token.len() < 2 || !token.ends_with(open) {
-                return Err(format!("unterminated text literal: {token}"));
-            }
-            return Ok(Value::Text(token[1..token.len() - 1].to_string()));
-        }
-    }
-
-    env.get_value(token)
-}
-
-fn parse_hashset(tokens: &[String], env: &Env) -> Result<Value, String> {
-    let mut items = HashSet::new();
-    for token in tokens {
-        let item = SetItem::from_value(parse_value(token, env)?)?;
-        items.insert(item);
-    }
-    Ok(Value::HashSet(items))
-}
-
-fn parse_matrix(tokens: &[String], env: &Env) -> Result<Value, String> {
-    let mut rows: HashMap<String, HashMap<String, Value>> = HashMap::new();
-    let mut i = 0;
-
-    while i < tokens.len() {
-        let outer_key = tokens[i].clone();
-        if !is_name(&outer_key) {
-            return Err(format!("'{outer_key}' is not a valid matrix row name"));
-        }
-        i += 1;
-
-        if tokens.get(i).map(String::as_str) != Some("{") {
-            return Err("expected: matrix row { key value key value }".to_string());
-        }
-        i += 1;
-
-        let mut inner: HashMap<String, Value> = HashMap::new();
-        while i < tokens.len() && tokens[i] != "}" {
-            let inner_key = tokens[i].clone();
-            if !is_name(&inner_key) {
-                return Err(format!("'{inner_key}' is not a valid matrix column name"));
-            }
-            i += 1;
-            let Some(value_token) = tokens.get(i) else {
-                return Err(format!("matrix column '{inner_key}' is missing a value"));
-            };
-            inner.insert(inner_key, parse_value(value_token, env)?);
-            i += 1;
-        }
-
-        if tokens.get(i).map(String::as_str) != Some("}") {
-            return Err("matrix row is missing a closing }".to_string());
-        }
-        i += 1;
-        rows.insert(outer_key, inner);
-    }
-
-    Ok(Value::Matrix(rows))
-}
-
-fn parse_value_tokens(tokens: &[String], env: &Env) -> Result<Value, String> {
-    if tokens.is_empty() {
-        return Err("missing value".to_string());
-    }
-
-    match tokens[0].as_str() {
-        "hashset" | "set" => parse_hashset(&tokens[1..], env),
-        "matrix" | "matrex" => parse_matrix(&tokens[1..], env),
-        _ if tokens.len() == 1 => parse_value(&tokens[0], env),
-        _ => Err("expected a single value, hashset, or matrix".to_string()),
-    }
-}
-
-pub fn parse_name_and_eq_value(tokens: &[String]) -> Result<(String, &str), String> {
-    let eq_at = find_val_in_compound_data_type(tokens, "=");
-    if tokens.len() != 3 || eq_at != [1] {
-        return Err("expected: name = value".to_string());
-    }
-
-    let name = tokens[0].clone();
-    if !is_name(&name) {
-        return Err(format!("'{name}' is not a valid name"));
-    }
-
-    Ok((name, tokens[2].as_str()))
-}
-
-pub fn parse_assignment(tokens: &[String], env: &Env) -> Result<(String, Value), String> {
-    if tokens.len() < 3 {
-        return Err("expected: name = value".to_string());
-    }
-
-    let eq_at = find_val_in_compound_data_type(tokens, "=");
-    if eq_at.first() != Some(&1) {
-        return Err("expected: name = value".to_string());
-    }
-
-    let name = tokens[0].clone();
-    if !is_name(&name) {
-        return Err(format!("'{name}' is not a valid name"));
-    }
-
-    let value = parse_value_tokens(&tokens[2..], env)?;
-    Ok((name, value))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn keeps_quoted_text_together() {
-        assert_eq!(
-            parse_line(r#"console.println("hello world")"#),
-            vec![r#"console.println("hello world")"#.to_string()]
-        );
-        assert_eq!(
-            parse_line(r#"let msg = "hi there"; console.println(msg)"#),
-            vec!["let".to_string(), "msg".into(), "=".into(), r#""hi there""#.into()]
-        );
+    fn expression_of(source: &str) -> Expr {
+        let statements = Parser::parse(source).unwrap();
+        match statements.into_iter().next().unwrap().kind {
+            StmtKind::Expression(expr) => expr,
+            StmtKind::Declare { value, .. } => value,
+            other => panic!("expected an expression, got {other:?}"),
+        }
     }
 
     #[test]
-    fn parses_console_calls() {
-        let call = parse_console_call(&parse_line("console.println(x)"))
-            .unwrap()
-            .unwrap();
-        assert_eq!(call.method, "println");
-        assert_eq!(call.args, vec!["x".to_string()]);
+    fn multiplication_binds_tighter_than_addition() {
+        let expr = expression_of("1 + 2 * 3");
 
-        let call = parse_console_call(&parse_line("console.clear()"))
-            .unwrap()
-            .unwrap();
-        assert_eq!(call.method, "clear");
-        assert!(call.args.is_empty());
-
-        let call = parse_console_call(&parse_line(r#"console.println("hi there")"#))
-            .unwrap()
-            .unwrap();
-        assert_eq!(call.args, vec![r#""hi there""#.to_string()]);
-
-        // A comma inside text must not split the argument list.
-        let call = parse_console_call(&parse_line(r#"console.println("Hello, world!")"#))
-            .unwrap()
-            .unwrap();
-        assert_eq!(call.args, vec![r#""Hello, world!""#.to_string()]);
-
-        let call = parse_console_call(&parse_line(r#"console.println("a", "b")"#))
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            call.args,
-            vec![r#""a""#.to_string(), r#""b""#.to_string()]
-        );
-
-        assert!(parse_console_call(&parse_line("let x = 1")).unwrap().is_none());
-        assert!(parse_console_call(&parse_line("console.println(x)")).is_ok());
-        assert!(parse_console_call(&parse_line("console.println(x")).is_err());
-        assert!(parse_console_call(&parse_line("console.println()")).is_ok());
+        let Expr::Binary { op, right, .. } = expr else {
+            panic!("expected a binary expression");
+        };
+        assert_eq!(op, BinaryOp::Add);
+        assert!(matches!(
+            *right,
+            Expr::Binary {
+                op: BinaryOp::Multiply,
+                ..
+            }
+        ));
     }
 
     #[test]
-    fn reports_unterminated_text() {
-        let env = Env::new();
-        let err = parse_value(r#""oops"#, &env).unwrap_err();
-        assert!(err.contains("unterminated text literal"), "{err}");
+    fn and_binds_tighter_than_or() {
+        let expr = expression_of("a or b and c");
+
+        let Expr::Binary { op, right, .. } = expr else {
+            panic!("expected a binary expression");
+        };
+        assert_eq!(op, BinaryOp::Or);
+        assert!(matches!(
+            *right,
+            Expr::Binary {
+                op: BinaryOp::And,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn comparisons_chain_below_equality() {
+        let expr = expression_of("a is b greater 1");
+
+        let Expr::Binary { op, right, .. } = expr else {
+            panic!("expected a binary expression");
+        };
+        assert_eq!(op, BinaryOp::Is);
+        assert!(matches!(
+            *right,
+            Expr::Binary {
+                op: BinaryOp::Greater,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_control_flow() {
+        let source = "if a greater 1 {\n    while a less 10 {\n        a = a + 1\n    }\n} else {\n    for x in hashset 1 2 3 {\n        console.println(x)\n        break\n    }\n}";
+        let statements = Parser::parse(source).unwrap();
+        assert_eq!(statements.len(), 1);
+
+        let StmtKind::If { else_branch, .. } = &statements[0].kind else {
+            panic!("expected an if statement");
+        };
+        assert!(else_branch.is_some());
+    }
+
+    #[test]
+    fn assignment_needs_a_variable() {
+        let error = Parser::parse("1 = 2").unwrap_err();
+        assert!(error.message.contains("only a variable"), "{error}");
     }
 }

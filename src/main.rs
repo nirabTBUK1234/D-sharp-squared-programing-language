@@ -1,3 +1,5 @@
+mod error;
+mod lexer;
 mod parser;
 mod runner;
 mod value;
@@ -5,12 +7,14 @@ mod value;
 use std::env;
 use runner::run::{run_file, run_prompt};
 
-fn real_main() -> i32{
-    let args:Vec<String> = env::args().collect();
+fn real_main() -> i32 {
+    let args: Vec<String> = env::args().collect();
+
     if args.len() > 2 {
-        println!("Usage: jlox [script]");
+        let program = args[0].rsplit('/').next().unwrap_or("dsharp2");
+        println!("Usage: {program} [script]");
         return 0;
-    } 
+    }
     else if args.len() == 2{
 
         match run_file(&args[1]){
@@ -31,7 +35,7 @@ fn real_main() -> i32{
 
     }
 
-    return 0;
+    0
 }
 
 

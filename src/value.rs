@@ -31,6 +31,7 @@ impl SetItem {
             Value::Text(s) => Ok(SetItem::Text(s)),
             Value::HashSet(_) => Err("hashset items cannot be another hashset".to_string()),
             Value::Matrix(_) => Err("hashset items cannot be a matrix".to_string()),
+            Value::Void => Err("hashset items cannot be void".to_string()),
         }
     }
 }
@@ -43,6 +44,22 @@ pub enum Value {
     Text(String),
     HashSet(HashSet<SetItem>),
     Matrix(HashMap<String, HashMap<String, Value>>),
+    /// The result of a call that only has side effects, e.g. `console.println`.
+    Void,
+}
+
+impl Value {
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Value::Int(_) => "int",
+            Value::Float(_) => "float",
+            Value::Bool(_) => "bool",
+            Value::Text(_) => "text",
+            Value::HashSet(_) => "hashset",
+            Value::Matrix(_) => "matrix",
+            Value::Void => "void",
+        }
+    }
 }
 
 impl fmt::Display for Value {
@@ -79,6 +96,7 @@ impl fmt::Display for Value {
                 parts.sort();
                 write!(f, "matrix {}", parts.join(" "))
             }
+            Value::Void => write!(f, "void"),
         }
     }
 }
