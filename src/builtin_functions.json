@@ -1,0 +1,270 @@
+{
+
+    "methords":{
+        "console": {
+            "console.debug(x)": "dbg!(x)",
+            "console.print(x)": "print!(x)",
+            "console.println(x)": "println!(x)",
+            "console.input()": "io::stdin().read_line()",
+            "console.clear()": "terminal::clear()",
+            "console.warn(x)": "eprintln!(x)",
+            "console.error(x)": "eprintln!(x)"
+        },
+
+        "file system": {
+            "file.read()": "fs::read_to_string(self)",
+            "file.write(data)": "fs::write(self, data)",
+            "file.append(data)": "OpenOptions::append(self, data)",
+            "file.delete()": "fs::remove_file(self)",
+            "file.copy(dest)": "fs::copy(self, dest)",
+            "file.rename(new)": "fs::rename(self, new)",
+            "file.exists()": "Path::exists(self)",
+            "file.create()": "File::create(self)",
+            "file.size()": "fs::metadata(self).len()"
+        },
+
+        "data": {
+            "data.serialize()": "serde_json::to_string(self)",
+            "data.deserialize()": "serde_json::from_str(self)",
+            "data.save_json(file)": "serde_json::to_writer(file, self)",
+            "data.load_json(file)": "serde_json::from_reader(file)",
+            "data.save_csv(file)": "csv::Writer::from_path(file)",
+            "data.load_csv(file)": "csv::Reader::from_path(file)",
+            "data.hash()": "DefaultHasher::new()",
+            "data.compress()": "zstd::encode_all(self)",
+            "data.decompress()": "zstd::decode_all(self)",
+            "data.size()": "std::mem::size_of_val(self)",
+            "data.filter(func)": "Data::filter(self, func)",
+            "data.sort(operation)": "Data::sort(self, operation)",
+            "data.find(condition)": "Data::find(self, condition)",
+            "data.unique()": "Data::unique(self)",
+            "data.count(value)": "Data::count(self, value)",
+            "data.flatten()": "Data::flatten(self)",
+            "data.merge(other)": "Data::merge(self, other)",
+            "data.chunk(size)": "Data::chunk(self, size)",
+            "data.map(func)": "Data::map(self, func)",
+            "data.reduce(func)": "Data::reduce(self, func)"
+        },
+
+        "collections": {
+            "list.new()": "Vec::new()",
+            "map.new()": "HashMap::new()",
+            "set.new()": "HashSet::new()",
+            "collection.push(value)": "self.push(value)",
+            "collection.pop()": "self.pop()",
+            "collection.insert(key, value)": "self.insert(key, value)",
+            "collection.remove(key)": "self.remove(key)",
+            "collection.get(key)": "self.get(key)",
+            "collection.contains(value)": "self.contains(value)",
+            "collection.length()": "self.len()",
+            "collection.clear()": "self.clear()",
+            "collection.keys()": "self.keys()",
+            "collection.values()": "self.values()"
+        },
+
+        "query": {
+            "map.select(query)": "Query::select(self, query)",
+            "map.insert(query)": "Query::insert(self, query)",
+            "map.update(query)": "Query::update(self, query)",
+            "map.delete(query)": "Query::delete(self, query)",
+            "map.where(condition)": "Query::where(self, condition)",
+            "map.sort(operation)": "Query::sort(self, operation)",
+            "map.count()": "Query::count(self)",
+            "map.filter(func)": "Query::filter(self, func)",
+            "map.limit(amount)": "Query::limit(self, amount)",
+            "map.distinct()": "Query::distinct(self)",
+            "map.sum(key)": "Query::sum(self, key)",
+            "map.average(key)": "Query::average(self, key)",
+            "map.min(key)": "Query::min(self, key)",
+            "map.max(key)": "Query::max(self, key)"
+        },
+
+        "matrexes": {
+            "matrex.new(values)": "Matrex::new(values)",
+            "matrex.sort()": "Matrex::sort(self)",
+            "matrex.sort_asc()": "Matrex::sort_asc(self)",
+            "matrex.sort_desc()": "Matrex::sort_desc(self)",
+            "matrex.sort_by(key)": "Matrex::sort_by(self, key)",
+            "matrex.multi_sort(keys)": "Matrex::multi_sort(self, keys)",
+            "matrex.reverse()": "Matrex::reverse(self)",
+            "matrex.filter(condition)": "Matrex::filter(self, condition)",
+            "matrex.unique()": "Matrex::unique(self)",
+            "matrex.count(value)": "Matrex::count(self, value)",
+            "matrex.min()": "Matrex::min(self)",
+            "matrex.max()": "Matrex::max(self)",
+            "matrex.sum()": "Matrex::sum(self)",
+            "matrex.average()": "Matrex::average(self)",
+            "matrex.median()": "Matrex::median(self)",
+            "matrex.index(value)": "Matrex::index(self, value)",
+            "matrex.find(condition)": "Matrex::find(self, condition)",
+            "matrex.push(value)": "Matrex::push(self, value)",
+            "matrex.pop()": "Matrex::pop(self)",
+            "matrex.length()": "Matrex::length(self)"
+        },
+
+        "time": {
+            "time.now()": "SystemTime::now()",
+            "time.timestamp()": "UNIX_EPOCH.elapsed()",
+            "time.sleep(seconds)": "thread::sleep(seconds)",
+            "time.measure(func)": "Instant::now()",
+            "time.format(date)": "chrono::format(date)",
+            "time.parse(date)": "chrono::parse(date)"
+        },
+
+        "math": {
+            "math.abs(x)": "x.abs()",
+            "math.sqrt(x)": "x.sqrt()",
+            "math.pow(x, y)": "x.powf(y)",
+            "math.round(x)": "x.round()",
+            "math.floor(x)": "x.floor()",
+            "math.ceil(x)": "x.ceil()",
+            "math.min(x, y)": "x.min(y)",
+            "math.max(x, y)": "x.max(y)",
+            "math.random(min, max)": "rand::random_range(min..=max)"
+        },
+
+        "game": {
+            "game.random_int(min, max)": "rand::random_range(min..=max)",
+            "game.random_float(min, max)": "rand::random_range(min..=max)",
+            "entity.collision(other)": "self.intersects(other)",
+            "entity.distance(other)": "self.distance(other)",
+            "value.clamp(min, max)": "self.clamp(min, max)",
+            "assets.load(path)": "AssetLoader::load(path)",
+            "audio.play(sound)": "Audio::play(sound)",
+            "audio.stop(sound)": "Audio::stop(sound)",
+            "time.delta()": "Time::delta()",
+            "world.spawn(data)": "World::spawn(data)",
+            "world.remove(id)": "World::despawn(id)"
+        },
+
+        "system": {
+            "system.os()": "std::env::consts::OS",
+            "system.architecture()": "std::env::consts::ARCH",
+            "system.environment(name)": "std::env::var(name)",
+            "system.arguments()": "std::env::args()",
+            "system.current_dir()": "std::env::current_dir()",
+            "system.memory_size()": "std::mem::size_of_val(self)",
+            "system.exit(code)": "std::process::exit(code)"
+        }
+    },
+    "keywords":{
+        
+        "variables": {
+            "let": "let",
+            "mut": "mut",
+            "const": "const",
+            "static": "static",
+            "del": "drop",
+            "type": "type"
+        },
+
+        "functions": {
+            "fn": "fn",
+            "return": "return",
+            "yield": "yield",
+            "async": "async",
+            "await": ".await",
+            "lambda": "|args| expression"
+        },
+
+        "control flow": {
+            "if": "if",
+            "else": "else",
+            "match": "match",
+            "for": "for",
+            "while": "while",
+            "loop": "loop",
+            "break": "break",
+            "continue": "continue",
+            "in": "in"
+        },
+
+        "oop": {
+            "class": "struct",
+            "struct": "struct",
+            "impl": "impl",
+            "trait": "trait",
+            "extends": "trait implementation",
+            "self": "self",
+            "super": "super",
+            "new": "associated constructor",
+            "enum": "enum",
+            "pub": "pub",
+            "private": "private field"
+        },
+
+        "modules": {
+            "use": "use",
+            "mod": "mod",
+            "import": "use",
+            "export": "pub",
+            "as": "as",
+            "crate": "crate"
+        },
+
+        "error handling": {
+            "try": "try",
+            "catch": "match Result",
+            "throw": "return Err",
+            "panic": "panic!",
+            "unwrap": ".unwrap()",
+            "expect": ".expect()",
+            "ok": "Ok",
+            "err": "Err"
+        },
+
+        "operators": {
+            "and": "&&",
+            "or": "||",
+            "not": "!",
+            "is": "==",
+            "is_not": "!=",
+            "greater": ">",
+            "less": "<",
+            "greater_equal": ">=",
+            "less_equal": "<=",
+            "assign": "="
+        },
+
+        "data types": {
+            "int": "i64",
+            "float": "f64",
+            "string": "String",
+            "char": "char",
+            "bool": "bool",
+            "void": "()",
+            "list": "Vec",
+            "map": "HashMap",
+            "set": "HashSet",
+            "hashset": "HashSet",
+            "matrix": "HashMap<String, HashMap<String, Value>>",
+            "matrex": "HashMap<String, HashMap<String, Value>>"
+        },
+
+        "memory": {
+            "ref": "&",
+            "mut_ref": "&mut",
+            "box": "Box",
+            "arc": "Arc",
+            "rc": "Rc",
+            "clone": ".clone()",
+            "move": "move"
+        },
+
+        "other": {
+            "where": "where",
+            "self_type": "Self",
+            "sizeof": "std::mem::size_of",
+            "typeof": "std::any::type_name",
+            "assert": "assert!",
+            "assert_equal": "assert_eq!",
+            "debug_assert": "debug_assert!",
+            "unsafe": "unsafe",
+            "extern": "extern",
+            "dyn": "dyn",
+            "macro": "macro_rules!"
+        }
+            
+        
+    }
+}
