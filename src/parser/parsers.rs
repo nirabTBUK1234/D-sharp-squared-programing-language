@@ -153,7 +153,7 @@ pub fn parse_console_call(line: &[String]) -> Result<Option<ConsoleCall>, String
     let mut args: Vec<String> = Vec::new();
     let args_text = &rest[open + 1..close];
     if !args_text.trim().is_empty() {
-        for arg in args_text.split(',') {
+        for arg in split_args(args_text) {
             let arg = arg.trim();
             if arg.is_empty() {
                 return Err(format!("console.{method}() has an empty argument"));
@@ -171,6 +171,40 @@ pub fn parse_console_call(line: &[String]) -> Result<Option<ConsoleCall>, String
         method: method.to_string(),
         args,
     }))
+}
+
+/// Splits an argument list on commas that are outside text literals, so
+/// `console.println("Hello, world!")` stays a single argument.
+fn split_args(text: &str) -> Vec<&str> {
+    let mut args: Vec<&str> = Vec::new();
+    let mut start = 0;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    for (idx, ch) in text.char_indices() {
+        if let Some(open) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' && open == '"' {
+                escaped = true;
+            } else if ch == open {
+                quote = None;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' | '\'' => quote = Some(ch),
+            ',' => {
+                args.push(&text[start..idx]);
+                start = idx + 1;
+            }
+            _ => {}
+        }
+    }
+
+    args.push(&text[start..]);
+    args
 }
 
 fn is_single_value(text: &str) -> bool {
@@ -374,6 +408,20 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(call.args, vec![r#""hi there""#.to_string()]);
+
+        // A comma inside text must not split the argument list.
+        let call = parse_console_call(&parse_line(r#"console.println("Hello, world!")"#))
+            .unwrap()
+            .unwrap();
+        assert_eq!(call.args, vec![r#""Hello, world!""#.to_string()]);
+
+        let call = parse_console_call(&parse_line(r#"console.println("a", "b")"#))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            call.args,
+            vec![r#""a""#.to_string(), r#""b""#.to_string()]
+        );
 
         assert!(parse_console_call(&parse_line("let x = 1")).unwrap().is_none());
         assert!(parse_console_call(&parse_line("console.println(x)")).is_ok());
