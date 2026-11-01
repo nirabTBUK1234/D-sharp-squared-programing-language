@@ -228,14 +228,35 @@ impl Parser {
         let expr = self.expression()?;
 
         if self.match_kind(&TokenKind::Assign) {
-            let Expr::Var(name) = expr else {
-                return Err(Error::new(line, "only a variable can be assigned to"));
-            };
             let value = self.expression()?;
-            return Ok(Stmt {
-                kind: StmtKind::Assign { name, value },
-                line,
-            });
+
+            return match expr {
+                Expr::Var(name) => Ok(Stmt {
+                    kind: StmtKind::Assign { name, value },
+                    line,
+                }),
+                Expr::Index { object, index } => {
+                    let Expr::Var(name) = *object else {
+                        return Err(Error::new(
+                            line,
+                            "only a variable lookup or map entry can be assigned to",
+                        ));
+                    };
+
+                    Ok(Stmt {
+                        kind: StmtKind::IndexAssign {
+                            name,
+                            index: *index,
+                            value,
+                        },
+                        line,
+                    })
+                }
+                _ => Err(Error::new(
+                    line,
+                    "only a variable or map lookup can be assigned to",
+                )),
+            };
         }
 
         Ok(Stmt {
@@ -409,7 +430,24 @@ impl Parser {
             });
         }
 
-        self.primary_expression()
+        self.postfix_expression()
+    }
+
+    fn postfix_expression(&mut self) -> Result<Expr, Error> {
+        let mut expr = self.primary_expression()?;
+
+        while self.match_kind(&TokenKind::LeftBracket) {
+            self.skip_newlines();
+            let index = self.expression()?;
+            self.skip_newlines();
+            self.consume(&TokenKind::RightBracket, "expected ']' after the index")?;
+            expr = Expr::Index {
+                object: Box::new(expr),
+                index: Box::new(index),
+            };
+        }
+
+        Ok(expr)
     }
 
     fn primary_expression(&mut self) -> Result<Expr, Error> {
@@ -466,9 +504,9 @@ impl Parser {
 
                 Ok(Expr::Var(name))
             }
-            TokenKind::Hashset => {
+            TokenKind::LeftBrace => {
                 self.advance();
-                self.hashset_literal()
+                self.map_literal()
             }
             TokenKind::Matrix => {
                 self.advance();
@@ -513,46 +551,31 @@ impl Parser {
         Ok(args)
     }
 
-    fn hashset_literal(&mut self) -> Result<Expr, Error> {
-        let mut items: Vec<Expr> = Vec::new();
+    fn map_literal(&mut self) -> Result<Expr, Error> {
+        self.skip_separators();
 
-        while self.starts_value() {
-            items.push(self.expression()?);
-        }
+        let mut entries: Vec<(Expr, Expr)> = Vec::new();
 
-        Ok(Expr::HashSet(items))
-    }
-
-    fn matrix_literal(&mut self) -> Result<Expr, Error> {
-        if self.check(&TokenKind::LeftBrace) {
-            return self.braced_matrix_literal();
-        }
-
-        let mut rows: Vec<(String, Vec<(String, Expr)>)> = Vec::new();
-
-        while let TokenKind::Identifier(name) = self.peek().kind.clone() {
-            self.advance();
+        while !self.check(&TokenKind::RightBrace) && !self.check(&TokenKind::Eof) {
+            let key = self.expression()?;
             self.consume(
-                &TokenKind::LeftBrace,
-                "expected '{' after the matrix row name",
+                &TokenKind::Colon,
+                "expected ':' between a hashmap key and value",
             )?;
+            let value = self.expression()?;
+            entries.push((key, value));
 
-            let mut cells: Vec<(String, Expr)> = Vec::new();
-            while let TokenKind::Identifier(key) = self.peek().kind.clone() {
-                self.advance();
-                let value = self.expression()?;
-                cells.push((key, value));
-            }
-
-            self.consume(&TokenKind::RightBrace, "expected '}' to close the matrix row")?;
-            rows.push((name, cells));
+            self.skip_newlines();
+            self.match_kind(&TokenKind::Comma);
+            self.skip_separators();
         }
 
-        Ok(Expr::Matrix(rows))
+        self.consume(&TokenKind::RightBrace, "expected '}' to close the hashmap")?;
+        Ok(Expr::Map(entries))
     }
 
     /// `mat{row1: {a: 1, b: 2}, row2: {a: 3}}`
-    fn braced_matrix_literal(&mut self) -> Result<Expr, Error> {
+    fn matrix_literal(&mut self) -> Result<Expr, Error> {
         self.consume(&TokenKind::LeftBrace, "expected '{' after 'mat'")?;
         self.skip_separators();
 
@@ -613,24 +636,6 @@ impl Parser {
                 format!("{message}, found {}", describe(&other)),
             )),
         }
-    }
-
-    fn starts_value(&self) -> bool {
-        matches!(
-            &self.peek().kind,
-            TokenKind::Int(_)
-                | TokenKind::Float(_)
-                | TokenKind::Text(_)
-                | TokenKind::True
-                | TokenKind::False
-                | TokenKind::None
-                | TokenKind::Identifier(_)
-                | TokenKind::LeftParen
-                | TokenKind::Minus
-                | TokenKind::Not
-                | TokenKind::Hashset
-                | TokenKind::Matrix
-        )
     }
 
     fn peek(&self) -> &Token {
@@ -786,7 +791,7 @@ mod tests {
 
     #[test]
     fn parses_pythonic_control_flow() {
-        let source = "if a > 1 {\n    while a < 10 {\n        a = a + 1\n    }\n} elif a == 1 {\n    print(a)\n} else {\n    for x in hashset 1 2 3 {\n        console.println(x)\n        break\n    }\n}";
+        let source = "if a > 1 {\n    while a < 10 {\n        a = a + 1\n    }\n} elif a == 1 {\n    print(a)\n} else {\n    for x in hashSet(1, 2, 3) {\n        console.println(x)\n        break\n    }\n}";
         let statements = Parser::parse(source).unwrap();
         assert_eq!(statements.len(), 1);
 
@@ -810,6 +815,27 @@ mod tests {
     fn statements_need_a_separator() {
         let error = Parser::parse("x = 1 y = 2").unwrap_err();
         assert!(error.message.contains("after a statement"), "{error}");
+    }
+
+    #[test]
+    fn parses_hashmaps_and_index_expressions() {
+        let expr = expression_of("x = {\"a\": 1, b: 2, 3: \"three\"}");
+        let Expr::Map(entries) = expr else {
+            panic!("expected a hashmap");
+        };
+        assert_eq!(entries.len(), 3);
+
+        let expr = expression_of(r#"data["a"][0]"#);
+        assert!(matches!(expr, Expr::Index { .. }));
+    }
+
+    #[test]
+    fn parses_index_assignment() {
+        let statements = Parser::parse("d[\"a\"] = 1").unwrap();
+        assert!(matches!(
+            &statements[0].kind,
+            StmtKind::IndexAssign { .. }
+        ));
     }
 
     #[test]

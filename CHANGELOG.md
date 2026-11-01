@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Language
+
+- `hashSet(1, 2, 3)` constructs a hashset (`set`/`hashset` aliases); the old
+  `hashset 1 2 3` literal syntax is gone. Hashsets print as `hashSet(...)`.
+- `{key: value}` is a Python-style hashmap literal, with `[ ]` lookups and
+  assignment (`d["a"]`, `d["b"] = 2`), key-based iteration, and `{}` for empty.
+- Hashmap keys can be int, float, bool, or text; missing keys and scalar-key
+  violations are errors with the source line.
+- Text indexing: `"abc"[0]` and `"abc"[-1]`.
+- Removed the old `matrix row1 { a 1 b 2 }` form; `mat{...}` is the only matrix
+  literal now.
+- Matrix display was already `mat{...}`; hashmap display is `{...}`.
+
+### Notes
+
+- Map literals cannot start a statement (that position is a block): use
+  `d = {}`.
+- Index assignment needs a variable base; `d["a"]["b"] = 1` is not supported.
+
 ## v1.0.0 — 2026-11-01
 
 The first stable release. It replaces the earlier pre-releases

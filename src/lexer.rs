@@ -10,6 +10,8 @@ pub enum TokenKind {
     RightBrace,
     LeftParen,
     RightParen,
+    LeftBracket,
+    RightBracket,
     Comma,
     Colon,
     Semicolon,
@@ -49,7 +51,6 @@ pub enum TokenKind {
     True,
     False,
     None,
-    Hashset,
     Matrix,
 
     // literals
@@ -100,6 +101,8 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Error> {
             '}' => single(&mut chars, &mut tokens, TokenKind::RightBrace, token_line),
             '(' => single(&mut chars, &mut tokens, TokenKind::LeftParen, token_line),
             ')' => single(&mut chars, &mut tokens, TokenKind::RightParen, token_line),
+            '[' => single(&mut chars, &mut tokens, TokenKind::LeftBracket, token_line),
+            ']' => single(&mut chars, &mut tokens, TokenKind::RightBracket, token_line),
             ',' => single(&mut chars, &mut tokens, TokenKind::Comma, token_line),
             ':' => single(&mut chars, &mut tokens, TokenKind::Colon, token_line),
             ';' => single(&mut chars, &mut tokens, TokenKind::Semicolon, token_line),
@@ -262,7 +265,6 @@ fn keyword(word: &str) -> TokenKind {
         "True" | "true" => TokenKind::True,
         "False" | "false" => TokenKind::False,
         "None" | "none" => TokenKind::None,
-        "hashset" | "set" => TokenKind::Hashset,
         "matrix" | "mat" | "matrex" => TokenKind::Matrix,
         "and" => TokenKind::And,
         "or" => TokenKind::Or,

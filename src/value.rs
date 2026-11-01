@@ -31,9 +31,26 @@ impl SetItem {
             Value::Text(s) => Ok(SetItem::Text(s)),
             Value::HashSet(_) => Err("hashset items cannot be another hashset".to_string()),
             Value::Matrix(_) => Err("hashset items cannot be a matrix".to_string()),
+            Value::Map(_) => Err("hashset items cannot be a hashmap".to_string()),
             Value::None => Err("hashset items cannot be None".to_string()),
         }
     }
+}
+
+/// Inside collections, text is quoted so the output looks like the literal.
+fn repr_value(value: &Value) -> String {
+    match value {
+        Value::Text(text) => format!("\"{}\"", escape_text(text)),
+        other => other.to_string(),
+    }
+}
+
+fn escape_text(text: &str) -> String {
+    text.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\t', "\\t")
+        .replace('\r', "\\r")
 }
 
 fn bool_text(value: bool) -> &'static str {
@@ -64,6 +81,8 @@ pub enum Value {
     Text(String),
     HashSet(HashSet<SetItem>),
     Matrix(HashMap<String, HashMap<String, Value>>),
+    /// `{"a": 1}`: Python-style dictionary keyed by hashable scalars.
+    Map(HashMap<SetItem, Value>),
     /// Python's `None`: the result of a call that only has side effects, and
     /// what a function returns when it falls off the end.
     None,
@@ -78,6 +97,7 @@ impl Value {
             Value::Text(_) => "text",
             Value::HashSet(_) => "hashset",
             Value::Matrix(_) => "matrix",
+            Value::Map(_) => "hashmap",
             Value::None => "None",
         }
     }
@@ -93,11 +113,7 @@ impl fmt::Display for Value {
             Value::HashSet(items) => {
                 let mut parts: Vec<String> = items.iter().map(ToString::to_string).collect();
                 parts.sort();
-                if parts.is_empty() {
-                    write!(f, "hashset")
-                } else {
-                    write!(f, "hashset {}", parts.join(" "))
-                }
+                write!(f, "hashSet({})", parts.join(", "))
             }
             Value::Matrix(rows) => {
                 if rows.is_empty() {
@@ -108,7 +124,9 @@ impl fmt::Display for Value {
                     .map(|(outer, inner)| {
                         let mut cells: Vec<String> = inner
                             .iter()
-                            .map(|(key, value)| format!("{}: {value}", display_key(key)))
+                            .map(|(key, value)| {
+                                format!("{}: {}", display_key(key), repr_value(value))
+                            })
                             .collect();
                         cells.sort();
                         format!("{}: {{{}}}", display_key(outer), cells.join(", "))
@@ -116,6 +134,14 @@ impl fmt::Display for Value {
                     .collect();
                 parts.sort();
                 write!(f, "mat{{{}}}", parts.join(", "))
+            }
+            Value::Map(entries) => {
+                let mut parts: Vec<String> = entries
+                    .iter()
+                    .map(|(key, value)| format!("{key}: {}", repr_value(value)))
+                    .collect();
+                parts.sort();
+                write!(f, "{{{}}}", parts.join(", "))
             }
             Value::None => write!(f, "None"),
         }

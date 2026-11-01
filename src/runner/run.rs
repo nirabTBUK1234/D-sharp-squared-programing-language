@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     error::Error as StdError,
     fs,
     io::{self, BufRead, Write},
@@ -117,6 +117,27 @@ impl Env {
 
         Err(format!("unknown variable '{name}'"))
     }
+
+    /// `name[key] = value`
+    pub fn assign_index(&mut self, name: &str, key: SetItem, value: Value) -> Result<(), String> {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(existing) = scope.get_mut(name) {
+                return match existing {
+                    Value::Map(entries) => {
+                        entries.insert(key, value);
+                        Ok(())
+                    }
+                    other => Err(format!(
+                        "cannot assign to a lookup on '{}': it is a {}, not a hashmap",
+                        name,
+                        other.type_name()
+                    )),
+                };
+            }
+        }
+
+        Err(format!("unknown variable '{name}'"))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -165,6 +186,15 @@ impl<'a> Interpreter<'a> {
             StmtKind::Assign { name, value } => {
                 let value = self.eval(value, line)?;
                 self.env.assign(name, value);
+                Ok(Flow::Normal)
+            }
+            StmtKind::IndexAssign { name, index, value } => {
+                let value = self.eval(value, line)?;
+                let index = self.eval(index, line)?;
+                let key = map_key(index, line)?;
+                self.env
+                    .assign_index(name, key, value)
+                    .map_err(|message| Error::new(line, message))?;
                 Ok(Flow::Normal)
             }
             StmtKind::Delete { name } => {
@@ -292,17 +322,16 @@ impl<'a> Interpreter<'a> {
                 .env
                 .get_value(name)
                 .map_err(|message| Error::new(line, message)),
-            Expr::HashSet(items) => {
-                let mut set_items = std::collections::HashSet::new();
+            Expr::Map(entries) => {
+                let mut map = HashMap::new();
 
-                for item in items {
-                    let value = self.eval(item, line)?;
-                    let set_item = SetItem::from_value(value)
-                        .map_err(|message| Error::new(line, message))?;
-                    set_items.insert(set_item);
+                for (key, value) in entries {
+                    let key = map_key(self.eval(key, line)?, line)?;
+                    let value = self.eval(value, line)?;
+                    map.insert(key, value);
                 }
 
-                Ok(Value::HashSet(set_items))
+                Ok(Value::Map(map))
             }
             Expr::Matrix(rows) => {
                 let mut matrix = HashMap::new();
@@ -318,6 +347,11 @@ impl<'a> Interpreter<'a> {
                 }
 
                 Ok(Value::Matrix(matrix))
+            }
+            Expr::Index { object, index } => {
+                let object = self.eval(object, line)?;
+                let index = self.eval(index, line)?;
+                index_value(object, index, line)
             }
             Expr::Unary { op, expr } => {
                 let value = self.eval(expr, line)?;
@@ -375,6 +409,17 @@ impl<'a> Interpreter<'a> {
         }
 
         match name {
+            "hashSet" | "hashset" | "set" => {
+                let mut items = HashSet::new();
+
+                for value in values {
+                    let item = SetItem::from_value(value)
+                        .map_err(|message| Error::new(line, message))?;
+                    items.insert(item);
+                }
+
+                Ok(Value::HashSet(items))
+            }
             "print" => {
                 let parts: Vec<String> = values.iter().map(ToString::to_string).collect();
                 println!("{}", parts.join(" "));
@@ -748,6 +793,11 @@ fn type_error(action: &str, left: &Value, right: &Value, line: usize) -> Error {
 fn iterate(value: &Value, line: usize) -> Result<Vec<Value>, Error> {
     match value {
         Value::HashSet(items) => Ok(items.iter().map(set_item_to_value).collect()),
+        Value::Map(entries) => {
+            let mut keys: Vec<&SetItem> = entries.keys().collect();
+            keys.sort_by_key(|key| key.to_string());
+            Ok(keys.into_iter().map(set_item_to_value).collect())
+        }
         Value::Matrix(rows) => {
             let mut names: Vec<String> = rows.keys().cloned().collect();
             names.sort();
@@ -757,7 +807,7 @@ fn iterate(value: &Value, line: usize) -> Result<Vec<Value>, Error> {
         other => Err(Error::new(
             line,
             format!(
-                "cannot loop over a {} (use a hashset, matrix, or text)",
+                "cannot loop over a {} (use a hashset, hashmap, matrix, or text)",
                 other.type_name()
             ),
         )),
@@ -770,6 +820,65 @@ fn set_item_to_value(item: &SetItem) -> Value {
         SetItem::Float(bits) => Value::Float(f64::from_bits(*bits)),
         SetItem::Bool(value) => Value::Bool(*value),
         SetItem::Text(text) => Value::Text(text.clone()),
+    }
+}
+
+fn map_key(value: Value, line: usize) -> Result<SetItem, Error> {
+    let type_name = value.type_name();
+
+    match SetItem::from_value(value) {
+        Ok(key) => Ok(key),
+        Err(_) => Err(Error::new(
+            line,
+            format!("hashmap keys must be int, float, bool, or text, got {type_name}"),
+        )),
+    }
+}
+
+fn index_value(object: Value, index: Value, line: usize) -> Result<Value, Error> {
+    match object {
+        Value::Map(entries) => {
+            let key = map_key(index, line)?;
+            entries
+                .get(&key)
+                .cloned()
+                .ok_or_else(|| Error::new(line, format!("hashmap key {key} not found")))
+        }
+        Value::Text(text) => {
+            let type_name = index.type_name();
+            let Value::Int(position) = index else {
+                return Err(Error::new(
+                    line,
+                    format!("text index must be an int, got {type_name}"),
+                ));
+            };
+
+            let chars: Vec<char> = text.chars().collect();
+            let resolved = if position < 0 {
+                chars.len() as i64 + position
+            } else {
+                position
+            };
+
+            if resolved < 0 || resolved as usize >= chars.len() {
+                return Err(Error::new(
+                    line,
+                    format!(
+                        "text index {position} is out of range (length {})",
+                        chars.len()
+                    ),
+                ));
+            }
+
+            Ok(Value::Text(chars[resolved as usize].to_string()))
+        }
+        other => Err(Error::new(
+            line,
+            format!(
+                "cannot index a {} (only hashmap and text support [ ])",
+                other.type_name()
+            ),
+        )),
     }
 }
 
@@ -948,7 +1057,7 @@ mod tests {
              \x20   letters = letters + 1\n\
              }\n\
              seen = 0\n\
-             for n in hashset 7 {\n\
+             for n in hashSet(7) {\n\
              \x20   seen = n\n\
              }",
         );
@@ -1094,8 +1203,8 @@ mod tests {
     #[test]
     fn hashset_and_matrix_still_work() {
         let env = env_after(
-            "nums = hashset 1 2 2\n\
-             grid = matrix row1 { a 1 b 2 } row2 { a 3 }",
+            "nums = hashSet(1, 2, 2)\n\
+             grid = mat{row1: {a: 1, b: 2}, row2: {a: 3}}",
         );
 
         match env.get_value("nums").unwrap() {
@@ -1115,6 +1224,115 @@ mod tests {
             }
             other => panic!("expected matrix, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn hashset_constructor_and_display() {
+        let env = env_after("nums = hashSet(3, 1, 2, 2)\nempty = hashSet()\nalias = set(1)");
+
+        match env.get_value("nums").unwrap() {
+            Value::HashSet(items) => {
+                assert_eq!(items.len(), 3);
+                assert!(items.contains(&SetItem::Int(1)));
+                assert!(items.contains(&SetItem::Int(2)));
+                assert!(items.contains(&SetItem::Int(3)));
+            }
+            other => panic!("expected hashset, got {other:?}"),
+        }
+
+        assert_eq!(
+            env.get_value("nums").unwrap().to_string(),
+            "hashSet(1, 2, 3)"
+        );
+        assert_eq!(env.get_value("empty").unwrap().to_string(), "hashSet()");
+        assert_eq!(env.get_value("alias").unwrap().to_string(), "hashSet(1)");
+    }
+
+    #[test]
+    fn hashmaps_support_literals_indexing_and_assignment() {
+        let env = env_after(
+            "scores = {\"a\": 1, \"b\": 2}\n\
+             first = scores[\"a\"]\n\
+             scores[\"c\"] = 3\n\
+             scores[\"b\"] = scores[\"b\"] + 10\n\
+             nested = {\"inner\": {\"x\": 1}}\n\
+             x = nested[\"inner\"][\"x\"]\n\
+             empty = {}",
+        );
+
+        assert_eq!(env.get_value("first").unwrap(), Value::Int(1));
+        assert_eq!(env.get_value("x").unwrap(), Value::Int(1));
+        assert_eq!(env.get_value("empty").unwrap().to_string(), "{}");
+
+        match env.get_value("scores").unwrap() {
+            Value::Map(entries) => {
+                assert_eq!(entries.len(), 3);
+                assert_eq!(entries[&SetItem::Text("a".into())], Value::Int(1));
+                assert_eq!(entries[&SetItem::Text("b".into())], Value::Int(12));
+                assert_eq!(entries[&SetItem::Text("c".into())], Value::Int(3));
+            }
+            other => panic!("expected hashmap, got {other:?}"),
+        }
+
+        assert_eq!(
+            env.get_value("scores").unwrap().to_string(),
+            "{\"a\": 1, \"b\": 12, \"c\": 3}"
+        );
+    }
+
+    #[test]
+    fn hashmap_keys_can_be_scalars() {
+        let env = env_after("m = {1: \"one\", True: \"yes\", 1.5: \"float\"}");
+
+        match env.get_value("m").unwrap() {
+            Value::Map(entries) => {
+                assert_eq!(entries[&SetItem::Int(1)], Value::Text("one".into()));
+                assert_eq!(entries[&SetItem::Bool(true)], Value::Text("yes".into()));
+                assert_eq!(
+                    entries[&SetItem::Float(1.5f64.to_bits())],
+                    Value::Text("float".into())
+                );
+            }
+            other => panic!("expected hashmap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_supports_indexing() {
+        let env = env_after("word = \"abc\"\nfirst = word[0]\nlast = word[-1]");
+        assert_eq!(env.get_value("first").unwrap(), Value::Text("a".into()));
+        assert_eq!(env.get_value("last").unwrap(), Value::Text("c".into()));
+    }
+
+    #[test]
+    fn for_loops_over_hashmap_keys() {
+        let env = env_after(
+            "d = {\"a\": 1, \"b\": 2}\n\
+             keys = \"\"\n\
+             for k in d {\n\
+             \x20   keys = keys + k\n\
+             }",
+        );
+
+        assert_eq!(env.get_value("keys").unwrap(), Value::Text("ab".into()));
+    }
+
+    #[test]
+    fn hashmap_errors_report_the_line() {
+        let error = error_of("d = {\"a\": 1}\nmissing = d[\"b\"]");
+        assert!(error.message.contains("not found"), "{error}");
+        assert_eq!(error.line, 2);
+
+        let error = error_of("x = 1\nx[\"a\"] = 2");
+        assert!(error.message.contains("not a hashmap"), "{error}");
+        assert_eq!(error.line, 2);
+
+        let error = error_of("d = {None: 1}");
+        assert!(error.message.contains("hashmap keys must be"), "{error}");
+
+        let error = error_of("x = 1\ny = x[0]");
+        assert!(error.message.contains("cannot index a int"), "{error}");
+        assert_eq!(error.line, 2);
     }
 
     #[test]

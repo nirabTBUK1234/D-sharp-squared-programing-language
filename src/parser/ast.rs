@@ -44,8 +44,12 @@ pub enum Expr {
     None,
     Text(String),
     Var(String),
-    HashSet(Vec<Expr>),
+    Map(Vec<(Expr, Expr)>),
     Matrix(Vec<(String, Vec<(String, Expr)>)>),
+    Index {
+        object: Box<Expr>,
+        index: Box<Expr>,
+    },
     Call {
         callee: Callee,
         args: Vec<Expr>,
@@ -66,6 +70,11 @@ pub enum StmtKind {
     /// `name = value`: creates the name, or updates the nearest existing one.
     Assign {
         name: String,
+        value: Expr,
+    },
+    IndexAssign {
+        name: String,
+        index: Expr,
         value: Expr,
     },
     Delete {

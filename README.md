@@ -3,8 +3,9 @@
 A small, interpreted programming language implemented in Rust. The keywords are
 Pythonic (`def`, `if`/`elif`/`else`, `x = 1`, `True`/`False`/`None`, `#`
 comments) but blocks use braces instead of indentation. It has a real lexer and
-recursive-descent parser, functions with defaults and recursion, loops, two
-compound value types (`hashset` and `matrix`), console built-ins, and a REPL.
+recursive-descent parser, functions with defaults and recursion, loops, three
+compound value types (`hashSet`, `{}` hashmaps, and `mat{}` matrices), console
+built-ins, and a REPL.
 
 It is still an early prototype: no classes, modules, `match`, or closures yet —
 see [Roadmap](#roadmap) and [Known limitations](#known-limitations).
@@ -82,7 +83,8 @@ FizzBuzz
 | Float | `3.14`, `-0.5` | 64-bit |
 | Bool | `True`, `False` | `true`/`false` are also accepted |
 | Text | `"hello"`, `'hi there'` | |
-| Hashset | `hashset 1 2 2` / `set 1 2` | Duplicates collapse; scalars only |
+| Hashset | `hashSet(1, 2, 2)` / `set(1, 2)` | Duplicates collapse; scalars only |
+| Hashmap | `{"a": 1, "b": 2}` | Keys can be int, float, bool, or text; read/write with `[ ]` |
 | Matrix | `mat{row1: {a: 1, b: 2}}` | Named rows of named cells; `matrix`/`matrex` are aliases |
 | None | `None` | Returned by functions that do not return a value |
 
@@ -132,8 +134,8 @@ for ch in "abc" {
 
 - Conditions must be `bool`; there is no truthiness, so `if 1 { }` is an error.
 - `elif` may follow `}` on the same line or the next line.
-- `for name in <value>` iterates a `hashset` (its items, unordered), a `matrix`
-  (row names, sorted), or `text` (characters).
+- `for name in <value>` iterates a `hashSet` (its items), a `hashmap` (its keys),
+  a `matrix` (row names, sorted), or `text` (characters).
 - `break` and `continue` only work inside a loop.
 - `loop { }` is a convenience for `while True` and is the one non-Python
   control-flow keyword kept as an extension.
@@ -197,23 +199,44 @@ so overflow is an error rather than a wrap.
 ### Collections
 
 ```text
-nums = hashset 1 2 2 3
+nums = hashSet(1, 2, 2, 3)
+scores = {"a": 1, "b": 2}
+scores["c"] = 3
 grid = mat{row1: {a: 1, b: 2}, row2: {a: 3}}
-print(nums)
-print(grid)
+
+print(nums)          # hashSet(1, 2, 3)
+print(scores)        # {"a": 1, "b": 2, "c": 3}
+print(scores["b"])   # 2
+print(grid)          # mat{row1: {a: 1, b: 2}, row2: {a: 3}}
+print("abc"[-1])     # c
 ```
 
-prints:
+**Hashsets.** `hashSet(...)` builds a set from its arguments (`set(...)` and
+`hashset(...)` are aliases); duplicates collapse, and `hashSet()` is empty.
+Items must be Int, Float, Bool, or Text — nesting a hashset, hashmap, or matrix
+is an error. Values print sorted, but iteration order is the hash order.
+
+**Hashmaps.** `{ key: value, ... }` is a Python-style dictionary. Keys are
+expressions and may be int, float, bool, or text; values are any expression.
+Keys are written as expressions, so `{"a": 1}` uses the text key `"a"` while
+`{a: 1}` looks up a variable named `a`:
 
 ```text
-hashset 1 2 3
-mat{row1: {a: 1, b: 2}, row2: {a: 3}}
+d = {"a": 1, 2: "two", True: 3}
+d["b"] = 4
+print(d["a"], d[2], d[True], d["b"])
 ```
 
-A matrix is braces after `mat` (or `matrix` / `matrex`), with rows shaped
-`name: { cell: value, ... }`. Commas between rows and cells are optional, and a
-trailing comma is allowed. Row and cell names are identifiers or text literals,
-and values may themselves be matrices:
+Read and write entries with `[ ]`. A missing key is an error
+(`hashmap key "zz" not found`), and index assignment needs a variable on the
+left (`d["a"] = 1`); chained writes like `d["a"]["b"] = 1` are not supported.
+Because `{ }` at the start of a statement means a block, write an empty map as
+`x = {}` (expression position), not on its own line.
+
+**Matrices.** `mat{...}` (also `matrix{...}` / `matrex{...}`) holds named rows
+of named cells, shaped `name: { cell: value, ... }`. Commas between rows and
+cells are optional, and a trailing comma is allowed. Row and cell names are
+identifiers or text literals, and values may themselves be matrices:
 
 ```text
 weird = mat{
@@ -222,10 +245,9 @@ weird = mat{
 }
 ```
 
-The older form is still accepted: `matrix row1 { a 1 b 2 } row2 { a 3 }`.
-Hashset elements must be Int, Float, Bool, or Text — nesting a hashset or matrix
-inside a hashset is an error. Values inside a hashset print in sorted order, but
-iteration order is the hash order.
+**Indexing and iteration.** `[ ]` also indexes text (`"abc"[0]` is `"a"`,
+`"abc"[-1]` is `"c"`). `for` iterates hashset items, hashmap keys, matrix row
+names, or text characters.
 
 ### Console
 
@@ -269,7 +291,8 @@ Printing an empty line: `print("")` (or `console.println("")`).
 | `a is b` / `a is_not b` | `a == b` / `a != b` |
 | `a greater b`, `a less_equal b`, ... | `a > b`, `a <= b`, ... |
 | `else if` | `elif` (`else if` still parses as nested `if`) |
-| `matrix row1 { a 1 b 2 }` | `mat{row1: {a: 1, b: 2}}` (old form still accepted) |
+| `hashset 1 2 3` | `hashSet(1, 2, 3)` (`set(...)`/`hashset(...)` also work) |
+| `matrix row1 { a 1 b 2 }` | `mat{row1: {a: 1, b: 2}}` |
 | `-- comment` | `# comment` |
 | `type Id = int` | removed |
 
@@ -279,7 +302,7 @@ Printing an empty line: `print("")` (or `console.println("")`).
 
 ```text
 > total = 0
-> for n in hashset 1 2 3 {
+> for n in hashSet(1, 2, 3) {
     total = total + n
   }
 > print(total)
@@ -327,7 +350,8 @@ The REPL prints the same format and keeps going.
 - Done, converted to Pythonic syntax: variables (plain assignment + `del`),
   control flow (`if`/`elif`/`else`/`while`/`loop`/`for`/`in`/`break`/`continue`),
   functions (`def`/`return`, defaults, recursion), operators (`and`/`or`/`not`
-  plus symbols), `True`/`False`/`None`, and `#` comments.
+  plus symbols), `True`/`False`/`None`, `#` comments, and collection literals
+  (`hashSet(...)`, `{key: value}` hashmaps with `[ ]` indexing, `mat{...}`).
 - Next: `match`, real closures/lexical scoping, then `class`/`struct`/`impl`,
   modules, and `try`/`except`/`raise`.
 - Built-in methods: only `console.*` (plus `print`/`input`) is implemented; the
@@ -336,14 +360,16 @@ The REPL prints the same format and keeps going.
 
 ## Known limitations
 
-- No classes, modules, `match`, `try`/`except`, lambdas, or dict literals
-  (`mat{...}` is the matrix type, not a general dictionary).
+- No classes, modules, `match`, `try`/`except`, or lambdas. `{...}` is a
+  hashmap literal; `mat{...}` is the matrix type.
 - Functions are dynamically scoped: a called function sees the *caller's*
   variables. There are no closures and no first-class function values yet.
 - No named/keyword arguments at call sites; defaults are positional.
 - No imports.
 - Numeric literals cannot start with a dot (`0.5` works, `.5` does not).
-- `hashset` still uses a keyword prefix (`hashset 1 2 3`); matrices use
-  `mat{...}`, but braces cannot also serve as dict literals because `{ }` means
-  "block" here.
+- A map literal cannot start a statement (that position is a block); assign it
+  to a name instead (`d = {}`).
+- Index assignment only targets a variable base (`d["a"] = 1`); chained writes
+  like `d["a"]["b"] = 1` are not supported.
+- Hashmap display is sorted, not insertion-ordered.
 - `builtin_functions.json` is larger than the implemented surface (see above).
