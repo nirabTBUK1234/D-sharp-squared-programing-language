@@ -9,6 +9,9 @@ compound value types (`hashset` and `matrix`), console built-ins, and a REPL.
 It is still an early prototype: no classes, modules, `match`, or closures yet —
 see [Roadmap](#roadmap) and [Known limitations](#known-limitations).
 
+- **v1.0.0** — first stable release (2026-11-01); see
+  [CHANGELOG.md](CHANGELOG.md). The earlier tags
+  (`PreReleace1OfV1.0`, `PreReleace2OfV1`) were pre-releases.
 - No external crates (std only)
 - Rust 2024 edition (Rust 1.85+)
 - Source: <https://github.com/nirabTBUK1234/D-sharp-squared-programing-language>
