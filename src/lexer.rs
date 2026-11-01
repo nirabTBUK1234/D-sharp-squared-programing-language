@@ -17,6 +17,7 @@ pub enum TokenKind {
     Semicolon,
     Newline,
     Dot,
+    Dollar,
 
     // operators
     Plus,
@@ -52,6 +53,9 @@ pub enum TokenKind {
     False,
     None,
     Matrix,
+    Struct,
+    Impl,
+    Macro,
 
     // literals
     Identifier(String),
@@ -107,6 +111,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Error> {
             ':' => single(&mut chars, &mut tokens, TokenKind::Colon, token_line),
             ';' => single(&mut chars, &mut tokens, TokenKind::Semicolon, token_line),
             '.' => single(&mut chars, &mut tokens, TokenKind::Dot, token_line),
+            '$' => single(&mut chars, &mut tokens, TokenKind::Dollar, token_line),
             '+' => single(&mut chars, &mut tokens, TokenKind::Plus, token_line),
             '-' => single(&mut chars, &mut tokens, TokenKind::Minus, token_line),
             '*' => single(&mut chars, &mut tokens, TokenKind::Star, token_line),
@@ -266,6 +271,9 @@ fn keyword(word: &str) -> TokenKind {
         "False" | "false" => TokenKind::False,
         "None" | "none" => TokenKind::None,
         "matrix" | "mat" | "matrex" => TokenKind::Matrix,
+        "struct" => TokenKind::Struct,
+        "impl" => TokenKind::Impl,
+        "macro" => TokenKind::Macro,
         "and" => TokenKind::And,
         "or" => TokenKind::Or,
         "not" => TokenKind::Not,

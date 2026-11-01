@@ -9,7 +9,7 @@ use std::{
 use crate::error::Error;
 use crate::parser::ast::{BinaryOp, Callee, Expr, Parameter, Stmt, StmtKind, UnaryOp};
 use crate::parser::parsers::Parser;
-use crate::value::{SetItem, Value};
+use crate::value::{SetItem, StructValue, Value};
 
 const CONSOLE_METHODS: &str = "console.debug, console.print, console.println, console.input, console.clear, console.warn, console.error";
 
@@ -40,6 +40,7 @@ pub fn run_with_env(env: &mut Env, source: &str) -> Result<(), Error> {
 pub struct Env {
     scopes: Vec<HashMap<String, Value>>,
     functions: Vec<HashMap<String, Rc<Function>>>,
+    structs: Vec<HashMap<String, StructDef>>,
 }
 
 struct Function {
@@ -47,22 +48,37 @@ struct Function {
     body: Vec<Stmt>,
 }
 
+#[derive(Clone)]
+struct StructDef {
+    fields: Vec<FieldDef>,
+    methods: HashMap<String, Rc<Function>>,
+}
+
+#[derive(Clone)]
+struct FieldDef {
+    name: String,
+    default: Option<Expr>,
+}
+
 impl Env {
     pub fn new() -> Self {
         Env {
             scopes: vec![HashMap::new()],
             functions: vec![HashMap::new()],
+            structs: vec![HashMap::new()],
         }
     }
 
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.functions.push(HashMap::new());
+        self.structs.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.functions.pop();
+        self.structs.pop();
     }
 
     pub fn define_function(&mut self, name: String, params: Vec<Parameter>, body: Vec<Stmt>) {
@@ -78,6 +94,36 @@ impl Env {
             .iter()
             .rev()
             .find_map(|scope| scope.get(name).cloned())
+    }
+
+    fn define_struct(&mut self, name: String, definition: StructDef) {
+        self.structs
+            .last_mut()
+            .expect("there is always a scope")
+            .insert(name, definition);
+    }
+
+    fn get_struct(&self, name: &str) -> Option<StructDef> {
+        self.structs
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).cloned())
+    }
+
+    fn add_method(
+        &mut self,
+        struct_name: &str,
+        method_name: String,
+        function: Rc<Function>,
+    ) -> Result<(), String> {
+        for scope in self.structs.iter_mut().rev() {
+            if let Some(definition) = scope.get_mut(struct_name) {
+                definition.methods.insert(method_name, function);
+                return Ok(());
+            }
+        }
+
+        Err(format!("unknown struct '{struct_name}'"))
     }
 
     fn define(&mut self, name: String, value: Value) {
@@ -129,6 +175,33 @@ impl Env {
                     }
                     other => Err(format!(
                         "cannot assign to a lookup on '{}': it is a {}, not a hashmap",
+                        name,
+                        other.type_name()
+                    )),
+                };
+            }
+        }
+
+        Err(format!("unknown variable '{name}'"))
+    }
+
+    /// `name.field = value`
+    pub fn assign_field(&mut self, name: &str, field: &str, value: Value) -> Result<(), String> {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(existing) = scope.get_mut(name) {
+                return match existing {
+                    Value::Struct(struct_value) => {
+                        if !struct_value.fields.contains_key(field) {
+                            return Err(format!(
+                                "struct '{}' has no field '{field}'",
+                                struct_value.type_name
+                            ));
+                        }
+                        struct_value.fields.insert(field.to_string(), value);
+                        Ok(())
+                    }
+                    other => Err(format!(
+                        "cannot assign field '{field}' on '{}': it is a {}, not a struct",
                         name,
                         other.type_name()
                     )),
@@ -195,6 +268,39 @@ impl<'a> Interpreter<'a> {
                 self.env
                     .assign_index(name, key, value)
                     .map_err(|message| Error::new(line, message))?;
+                Ok(Flow::Normal)
+            }
+            StmtKind::FieldAssign { name, field, value } => {
+                let value = self.eval(value, line)?;
+                self.env
+                    .assign_field(name, field, value)
+                    .map_err(|message| Error::new(line, message))?;
+                Ok(Flow::Normal)
+            }
+            StmtKind::Struct { name, fields } => {
+                let definition = StructDef {
+                    fields: fields
+                        .iter()
+                        .map(|field| FieldDef {
+                            name: field.name.clone(),
+                            default: field.default.clone(),
+                        })
+                        .collect(),
+                    methods: HashMap::new(),
+                };
+                self.env.define_struct(name.clone(), definition);
+                Ok(Flow::Normal)
+            }
+            StmtKind::Impl { name, methods } => {
+                for method in methods {
+                    let function = Rc::new(Function {
+                        params: method.params.clone(),
+                        body: method.body.clone(),
+                    });
+                    self.env
+                        .add_method(name, method.name.clone(), function)
+                        .map_err(|message| Error::new(line, message))?;
+                }
                 Ok(Flow::Normal)
             }
             StmtKind::Delete { name } => {
@@ -353,6 +459,29 @@ impl<'a> Interpreter<'a> {
                 let index = self.eval(index, line)?;
                 index_value(object, index, line)
             }
+            Expr::Field { object, name } => {
+                let object = self.eval(object, line)?;
+
+                match object {
+                    Value::Struct(struct_value) => struct_value
+                        .fields
+                        .get(name)
+                        .cloned()
+                        .ok_or_else(|| {
+                            Error::new(
+                                line,
+                                format!(
+                                    "struct '{}' has no field '{name}'",
+                                    struct_value.type_name
+                                ),
+                            )
+                        }),
+                    other => Err(Error::new(
+                        line,
+                        format!("cannot read field '{name}' from a {}", other.type_name()),
+                    )),
+                }
+            }
             Expr::Unary { op, expr } => {
                 let value = self.eval(expr, line)?;
                 unary_op(*op, value, line)
@@ -393,7 +522,25 @@ impl<'a> Interpreter<'a> {
 
                 match callee {
                     Callee::Method { receiver, method } => {
-                        call_builtin(receiver, method, &values, line)
+                        if let Expr::Var(name) = receiver.as_ref()
+                            && name == "console"
+                            && self.env.get_value(name).is_err()
+                        {
+                            return call_builtin(name, method, &values, line);
+                        }
+
+                        let receiver_name = match receiver.as_ref() {
+                            Expr::Var(name) => Some(name.clone()),
+                            _ => None,
+                        };
+                        let receiver = self.eval(receiver, line)?;
+                        self.call_method(
+                            receiver,
+                            receiver_name.as_deref(),
+                            method,
+                            values,
+                            line,
+                        )
                     }
                     Callee::Function(name) => self.call_named(name, values, line),
                 }
@@ -406,6 +553,10 @@ impl<'a> Interpreter<'a> {
     fn call_named(&mut self, name: &str, values: Vec<Value>, line: usize) -> Result<Value, Error> {
         if self.env.get_function(name).is_some() {
             return self.call_function(name, values, line);
+        }
+
+        if let Some(definition) = self.env.get_struct(name) {
+            return self.construct_struct(name, &definition, values, line);
         }
 
         match name {
@@ -446,6 +597,127 @@ impl<'a> Interpreter<'a> {
             .get_function(name)
             .expect("call_named checked that the function exists");
 
+        let label = format!("function '{name}'");
+        self.call_function_object(&label, &function, values, line)
+            .map(|(value, _)| value)
+    }
+
+    fn call_method(
+        &mut self,
+        receiver: Value,
+        receiver_name: Option<&str>,
+        method: &str,
+        mut values: Vec<Value>,
+        line: usize,
+    ) -> Result<Value, Error> {
+        let receiver_type = receiver.type_name().to_string();
+
+        let Value::Struct(struct_value) = receiver else {
+            return Err(Error::new(
+                line,
+                format!(
+                    "cannot call method '{method}' on a {receiver_type} (only structs have methods)"
+                ),
+            ));
+        };
+
+        let definition = self
+            .env
+            .get_struct(&struct_value.type_name)
+            .ok_or_else(|| {
+                Error::new(
+                    line,
+                    format!("unknown struct '{}'", struct_value.type_name),
+                )
+            })?;
+
+        let function = definition.methods.get(method).cloned().ok_or_else(|| {
+            Error::new(
+                line,
+                format!(
+                    "struct '{}' has no method '{method}'",
+                    struct_value.type_name
+                ),
+            )
+        })?;
+
+        let label = format!("method '{}.{method}'", struct_value.type_name);
+        values.insert(0, Value::Struct(struct_value));
+        let (result, final_self) = self.call_function_object(&label, &function, values, line)?;
+
+        // Python-style methods mutate the receiver, even though ordinary
+        // assignment copies values: write the final `self` back into the
+        // variable that was used for the call.
+        if let (Some(name), Some(self_value)) = (receiver_name, final_self) {
+            self.env.assign(name, self_value);
+        }
+
+        Ok(result)
+    }
+
+    fn construct_struct(
+        &mut self,
+        name: &str,
+        definition: &StructDef,
+        values: Vec<Value>,
+        line: usize,
+    ) -> Result<Value, Error> {
+        let required = definition
+            .fields
+            .iter()
+            .filter(|field| field.default.is_none())
+            .count();
+        let maximum = definition.fields.len();
+
+        if values.len() < required || values.len() > maximum {
+            let expected = if required == maximum {
+                format!("{required}")
+            } else {
+                format!("between {required} and {maximum}")
+            };
+
+            return Err(Error::new(
+                line,
+                format!(
+                    "struct '{name}' takes {expected} argument(s), but {} given",
+                    values.len()
+                ),
+            ));
+        }
+
+        let mut fields = HashMap::new();
+        let mut values = values.into_iter();
+
+        for field in &definition.fields {
+            let value = match values.next() {
+                Some(value) => value,
+                None => match &field.default {
+                    Some(default) => self.eval(default, line)?,
+                    None => {
+                        return Err(Error::new(
+                            line,
+                            format!("missing field '{}' for struct '{name}'", field.name),
+                        ));
+                    }
+                },
+            };
+
+            fields.insert(field.name.clone(), value);
+        }
+
+        Ok(Value::Struct(StructValue {
+            type_name: name.to_string(),
+            fields,
+        }))
+    }
+
+    fn call_function_object(
+        &mut self,
+        label: &str,
+        function: &Function,
+        values: Vec<Value>,
+        line: usize,
+    ) -> Result<(Value, Option<Value>), Error> {
         let required = function
             .params
             .iter()
@@ -463,7 +735,7 @@ impl<'a> Interpreter<'a> {
             return Err(Error::new(
                 line,
                 format!(
-                    "function '{name}' takes {expected} argument(s), but {} given",
+                    "{label} takes {expected} argument(s), but {} given",
                     values.len()
                 ),
             ));
@@ -471,7 +743,7 @@ impl<'a> Interpreter<'a> {
 
         self.env.push_scope();
 
-        let result = match self.bind_parameters(&function, values, line) {
+        let result = match self.bind_parameters(function, values, line) {
             Ok(()) => {
                 let loop_depth = std::mem::replace(&mut self.loop_depth, 0);
                 self.function_depth += 1;
@@ -493,8 +765,9 @@ impl<'a> Interpreter<'a> {
             Err(error) => Err(error),
         };
 
+        let final_self = self.env.get_value("self").ok();
         self.env.pop_scope();
-        result
+        result.map(|value| (value, final_self))
     }
 
     fn bind_parameters(
@@ -824,7 +1097,7 @@ fn set_item_to_value(item: &SetItem) -> Value {
 }
 
 fn map_key(value: Value, line: usize) -> Result<SetItem, Error> {
-    let type_name = value.type_name();
+    let type_name = value.type_name().to_string();
 
     match SetItem::from_value(value) {
         Ok(key) => Ok(key),
@@ -845,7 +1118,7 @@ fn index_value(object: Value, index: Value, line: usize) -> Result<Value, Error>
                 .ok_or_else(|| Error::new(line, format!("hashmap key {key} not found")))
         }
         Value::Text(text) => {
-            let type_name = index.type_name();
+            let type_name = index.type_name().to_string();
             let Value::Int(position) = index else {
                 return Err(Error::new(
                     line,
@@ -1456,5 +1729,113 @@ mod tests {
         // Braces and quotes inside text must not start a continuation.
         assert!(input_is_complete(r#"print("{")"#));
         assert!(!input_is_complete(r#"a = "unfinished"#));
+    }
+
+    #[test]
+    fn structs_have_fields_defaults_and_methods() {
+        let env = env_after(
+            "struct Point {\n\
+             x = 0\n\
+             y = 0\n\
+             }\n\
+             impl Point {\n\
+             def sum(self) {\n\
+             return self.x + self.y\n\
+             }\n\
+             def shift(self, dx, dy) {\n\
+             self.x = self.x + dx\n\
+             self.y = self.y + dy\n\
+             return self\n\
+             }\n\
+             }\n\
+             p = Point(1, 2)\n\
+             total = p.sum()\n\
+             p.x = 10\n\
+             q = Point()\n\
+             p.shift(1, 2)\n\
+             after = p.sum()",
+        );
+
+        assert_eq!(env.get_value("total").unwrap(), Value::Int(3));
+        assert_eq!(env.get_value("after").unwrap(), Value::Int(15));
+        assert_eq!(env.get_value("p").unwrap().to_string(), "Point(x=11, y=4)");
+        assert_eq!(env.get_value("q").unwrap().to_string(), "Point(x=0, y=0)");
+    }
+
+    #[test]
+    fn struct_and_method_errors_report_the_line() {
+        let error = error_of("struct P { x }\np = P(1)\np.nope()");
+        assert!(error.message.contains("has no method 'nope'"), "{error}");
+        assert_eq!(error.line, 3);
+
+        let error = error_of("struct P { x }\np = P(1)\np.nope");
+        assert!(error.message.contains("has no field 'nope'"), "{error}");
+        assert_eq!(error.line, 3);
+
+        let error = error_of("x = 1\nx.foo()");
+        assert!(
+            error.message.contains("cannot call method 'foo' on a int"),
+            "{error}"
+        );
+        assert_eq!(error.line, 2);
+
+        let error = error_of("struct P { x }\nP()");
+        assert!(error.message.contains("takes 1 argument(s)"), "{error}");
+        assert_eq!(error.line, 2);
+
+        let error = error_of("struct P { x }\np = P(1)\np.y = 2");
+        assert!(error.message.contains("has no field 'y'"), "{error}");
+        assert_eq!(error.line, 3);
+
+        let error = error_of("impl Missing { def m(self) { } }");
+        assert!(error.message.contains("unknown struct 'Missing'"), "{error}");
+    }
+
+    #[test]
+    fn macros_expand_statements() {
+        let env = env_after(
+            "macro unless($cond, $body) {\n\
+             if not ($cond) {\n\
+             $body\n\
+             }\n\
+             }\n\
+             result = 0\n\
+             unless(False, { result = 1 })\n\
+             unless(True, { result = 2 })",
+        );
+
+        assert_eq!(env.get_value("result").unwrap(), Value::Int(1));
+    }
+
+    #[test]
+    fn macros_are_textual_and_can_repeat_code() {
+        let env = env_after(
+            "counter = 0\n\
+             def bump() { counter = counter + 1 }\n\
+             macro twice($body) {\n\
+             $body\n\
+             $body\n\
+             }\n\
+             twice({ bump() })",
+        );
+
+        assert_eq!(env.get_value("counter").unwrap(), Value::Int(2));
+    }
+
+    #[test]
+    fn structs_work_inside_functions_and_collections() {
+        let env = env_after(
+            "struct Pair { left right }\n\
+             def make(a, b) { return Pair(a, b) }\n\
+             pair = make(\"x\", 2)\n\
+             texts = {\"pair\": pair}\n\
+             inner = texts[\"pair\"].left",
+        );
+
+        assert_eq!(env.get_value("inner").unwrap(), Value::Text("x".into()));
+        assert_eq!(
+            env.get_value("pair").unwrap().to_string(),
+            "Pair(left=\"x\", right=2)"
+        );
     }
 }

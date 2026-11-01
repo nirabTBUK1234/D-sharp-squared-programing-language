@@ -28,10 +28,23 @@ pub struct Parameter {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct StructField {
+    pub name: String,
+    pub default: Option<Expr>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Method {
+    pub name: String,
+    pub params: Vec<Parameter>,
+    pub body: Vec<Stmt>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Callee {
     Function(String),
     Method {
-        receiver: String,
+        receiver: Box<Expr>,
         method: String,
     },
 }
@@ -49,6 +62,10 @@ pub enum Expr {
     Index {
         object: Box<Expr>,
         index: Box<Expr>,
+    },
+    Field {
+        object: Box<Expr>,
+        name: String,
     },
     Call {
         callee: Callee,
@@ -76,6 +93,19 @@ pub enum StmtKind {
         name: String,
         index: Expr,
         value: Expr,
+    },
+    FieldAssign {
+        name: String,
+        field: String,
+        value: Expr,
+    },
+    Struct {
+        name: String,
+        fields: Vec<StructField>,
+    },
+    Impl {
+        name: String,
+        methods: Vec<Method>,
     },
     Delete {
         name: String,

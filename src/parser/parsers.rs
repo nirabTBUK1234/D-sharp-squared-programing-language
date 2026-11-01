@@ -1,16 +1,33 @@
+use std::collections::HashMap;
+
 use crate::error::Error;
 use crate::lexer::{Token, TokenKind, lex};
-use crate::parser::ast::{BinaryOp, Callee, Expr, Parameter, Stmt, StmtKind, UnaryOp};
+use crate::parser::ast::{
+    BinaryOp, Callee, Expr, Method, Parameter, Stmt, StmtKind, StructField, UnaryOp,
+};
 
 pub struct Parser {
     tokens: Vec<Token>,
     current: usize,
+    macros: HashMap<String, MacroDef>,
+    macro_depth: usize,
+}
+
+#[derive(Clone, Debug)]
+struct MacroDef {
+    params: Vec<String>,
+    body: Vec<Token>,
 }
 
 impl Parser {
     pub fn parse(source: &str) -> Result<Vec<Stmt>, Error> {
         let tokens = lex(source)?;
-        let mut parser = Parser { tokens, current: 0 };
+        let mut parser = Parser {
+            tokens,
+            current: 0,
+            macros: HashMap::new(),
+            macro_depth: 0,
+        };
         parser.program()
     }
 
@@ -42,6 +59,18 @@ impl Parser {
             TokenKind::Def => {
                 self.advance();
                 self.function_statement(line)
+            }
+            TokenKind::Struct => {
+                self.advance();
+                self.struct_statement(line)
+            }
+            TokenKind::Impl => {
+                self.advance();
+                self.impl_statement(line)
+            }
+            TokenKind::Macro => {
+                self.advance();
+                self.macro_definition(line)
             }
             TokenKind::Return => {
                 self.advance();
@@ -103,6 +132,10 @@ impl Parser {
                     kind: StmtKind::Block(body),
                     line,
                 })
+            }
+            TokenKind::Identifier(name) if self.macros.contains_key(&name) => {
+                self.advance();
+                self.expand_macro(&name, line)
             }
             _ => self.expression_statement(line),
         }
@@ -167,6 +200,314 @@ impl Parser {
             "expected ')' to close the parameter list",
         )?;
         Ok(params)
+    }
+
+    fn struct_statement(&mut self, line: usize) -> Result<Stmt, Error> {
+        let name = self.consume_identifier("expected a struct name after 'struct'")?;
+        self.consume(
+            &TokenKind::LeftBrace,
+            "expected '{' after the struct name",
+        )?;
+        self.skip_separators();
+
+        let mut fields: Vec<StructField> = Vec::new();
+        let mut seen_default = false;
+        while !self.check(&TokenKind::RightBrace) && !self.check(&TokenKind::Eof) {
+            let field_line = self.peek().line;
+            let field_name = self.consume_identifier("expected a field name")?;
+
+            if fields.iter().any(|field| field.name == field_name) {
+                return Err(Error::new(
+                    field_line,
+                    format!("struct '{name}' has duplicate field '{field_name}'"),
+                ));
+            }
+
+            let default = if self.match_kind(&TokenKind::Assign) {
+                Some(self.expression()?)
+            } else {
+                None
+            };
+
+            if default.is_none() && seen_default {
+                return Err(Error::new(
+                    field_line,
+                    format!(
+                        "field '{field_name}' without a default cannot follow one with a default"
+                    ),
+                ));
+            }
+            seen_default |= default.is_some();
+
+            fields.push(StructField {
+                name: field_name,
+                default,
+            });
+
+            self.skip_newlines();
+            self.match_kind(&TokenKind::Comma);
+            self.skip_separators();
+        }
+
+        self.consume(&TokenKind::RightBrace, "expected '}' to close the struct")?;
+        Ok(Stmt {
+            kind: StmtKind::Struct { name, fields },
+            line,
+        })
+    }
+
+    fn impl_statement(&mut self, line: usize) -> Result<Stmt, Error> {
+        let name = self.consume_identifier("expected a struct name after 'impl'")?;
+        self.consume(&TokenKind::LeftBrace, "expected '{' after the impl name")?;
+        self.skip_separators();
+
+        let mut methods: Vec<Method> = Vec::new();
+        while !self.check(&TokenKind::RightBrace) && !self.check(&TokenKind::Eof) {
+            let method_line = self.peek().line;
+            self.consume(&TokenKind::Def, "expected 'def' for a method")?;
+            let method_name = self.consume_identifier("expected a method name")?;
+            self.consume(
+                &TokenKind::LeftParen,
+                "expected '(' after the method name",
+            )?;
+            let params = self.parameters()?;
+
+            if params.first().map(|param| param.name.as_str()) != Some("self") {
+                return Err(Error::new(
+                    method_line,
+                    format!("method '{name}.{method_name}' must start with 'self'"),
+                ));
+            }
+
+            let body = self.block()?;
+            methods.push(Method {
+                name: method_name,
+                params,
+                body,
+            });
+            self.skip_separators();
+        }
+
+        self.consume(&TokenKind::RightBrace, "expected '}' to close the impl")?;
+        Ok(Stmt {
+            kind: StmtKind::Impl { name, methods },
+            line,
+        })
+    }
+
+    fn macro_definition(&mut self, line: usize) -> Result<Stmt, Error> {
+        let name = self.consume_identifier("expected a macro name after 'macro'")?;
+        self.consume(&TokenKind::LeftParen, "expected '(' after the macro name")?;
+        self.skip_newlines();
+
+        let mut params: Vec<String> = Vec::new();
+        if !self.match_kind(&TokenKind::RightParen) {
+            loop {
+                self.consume(
+                    &TokenKind::Dollar,
+                    "macro parameters must start with '$'",
+                )?;
+                let param = self.consume_identifier("expected a parameter name after '$'")?;
+                params.push(param);
+                self.skip_newlines();
+
+                if self.match_kind(&TokenKind::Comma) {
+                    self.skip_newlines();
+                    continue;
+                }
+                break;
+            }
+
+            self.consume(
+                &TokenKind::RightParen,
+                "expected ')' to close the macro parameters",
+            )?;
+        }
+
+        self.consume(
+            &TokenKind::LeftBrace,
+            "expected '{' to start the macro body",
+        )?;
+        let body = self.capture_balanced(
+            TokenKind::LeftBrace,
+            TokenKind::RightBrace,
+            "macro body",
+        )?;
+
+        self.macros.insert(name, MacroDef { params, body });
+
+        // A macro is compile-time only: this statement does nothing at runtime.
+        Ok(Stmt {
+            kind: StmtKind::Block(Vec::new()),
+            line,
+        })
+    }
+
+    fn expand_macro(&mut self, name: &str, line: usize) -> Result<Stmt, Error> {
+        if self.macro_depth >= 32 {
+            return Err(Error::new(
+                line,
+                format!("macro '{name}' expanded too deeply (recursive macro?)"),
+            ));
+        }
+
+        let definition = self
+            .macros
+            .get(name)
+            .cloned()
+            .expect("the caller checked that the macro exists");
+
+        self.consume(&TokenKind::LeftParen, "expected '(' after the macro name")?;
+        let arguments = self.capture_macro_arguments()?;
+
+        if arguments.len() != definition.params.len() {
+            return Err(Error::new(
+                line,
+                format!(
+                    "macro '{name}' takes {} argument(s), but {} given",
+                    definition.params.len(),
+                    arguments.len()
+                ),
+            ));
+        }
+
+        let mut expanded: Vec<Token> = Vec::new();
+        let mut index = 0;
+
+        while index < definition.body.len() {
+            let token = &definition.body[index];
+
+            if token.kind == TokenKind::Dollar {
+                let param = match definition.body.get(index + 1) {
+                    Some(Token {
+                        kind: TokenKind::Identifier(param),
+                        ..
+                    }) => param,
+                    _ => {
+                        return Err(Error::new(
+                            token.line,
+                            "expected a macro parameter name after '$'",
+                        ));
+                    }
+                };
+
+                let Some(position) = definition
+                    .params
+                    .iter()
+                    .position(|candidate| candidate == param)
+                else {
+                    return Err(Error::new(
+                        token.line,
+                        format!("macro '{name}' has no parameter '${param}'"),
+                    ));
+                };
+
+                expanded.extend(arguments[position].iter().cloned());
+                index += 2;
+                continue;
+            }
+
+            let mut token = token.clone();
+            token.line = line;
+            expanded.push(token);
+            index += 1;
+        }
+
+        expanded.push(Token {
+            kind: TokenKind::Eof,
+            line,
+        });
+
+        let mut parser = Parser {
+            tokens: expanded,
+            current: 0,
+            macros: self.macros.clone(),
+            macro_depth: self.macro_depth + 1,
+        };
+        let statements = parser.program()?;
+
+        Ok(Stmt {
+            kind: StmtKind::Block(statements),
+            line,
+        })
+    }
+
+    fn capture_balanced(
+        &mut self,
+        open: TokenKind,
+        close: TokenKind,
+        what: &str,
+    ) -> Result<Vec<Token>, Error> {
+        let mut depth = 1usize;
+        let mut tokens: Vec<Token> = Vec::new();
+
+        while depth > 0 {
+            if self.check(&TokenKind::Eof) {
+                return Err(Error::new(
+                    self.peek().line,
+                    format!("unterminated {what}"),
+                ));
+            }
+
+            let token = self.advance().clone();
+
+            if std::mem::discriminant(&token.kind) == std::mem::discriminant(&open) {
+                depth += 1;
+            } else if std::mem::discriminant(&token.kind) == std::mem::discriminant(&close) {
+                depth -= 1;
+            }
+
+            if depth > 0 {
+                tokens.push(token);
+            }
+        }
+
+        Ok(tokens)
+    }
+
+    fn capture_macro_arguments(&mut self) -> Result<Vec<Vec<Token>>, Error> {
+        let mut groups: Vec<Vec<Token>> = Vec::new();
+        let mut current: Vec<Token> = Vec::new();
+        let mut depth = 0usize;
+
+        if self.match_kind(&TokenKind::RightParen) {
+            return Ok(groups);
+        }
+
+        loop {
+            if self.check(&TokenKind::Eof) {
+                return Err(Error::new(
+                    self.peek().line,
+                    "unterminated macro call (missing ')')",
+                ));
+            }
+
+            let token = self.advance().clone();
+
+            match token.kind {
+                TokenKind::LeftParen | TokenKind::LeftBrace | TokenKind::LeftBracket => {
+                    depth += 1;
+                    current.push(token);
+                }
+                TokenKind::RightParen if depth == 0 => {
+                    trim_newlines(&mut current);
+                    if !current.is_empty() || groups.is_empty() {
+                        groups.push(current);
+                    }
+                    return Ok(groups);
+                }
+                TokenKind::RightParen | TokenKind::RightBrace | TokenKind::RightBracket => {
+                    depth = depth.saturating_sub(1);
+                    current.push(token);
+                }
+                TokenKind::Comma if depth == 0 => {
+                    let mut group = std::mem::take(&mut current);
+                    trim_newlines(&mut group);
+                    groups.push(group);
+                }
+                _ => current.push(token),
+            }
+        }
     }
 
     fn return_statement(&mut self, line: usize) -> Result<Stmt, Error> {
@@ -252,9 +593,22 @@ impl Parser {
                         line,
                     })
                 }
+                Expr::Field { object, name: field } => {
+                    let Expr::Var(name) = *object else {
+                        return Err(Error::new(
+                            line,
+                            "only a variable field can be assigned to",
+                        ));
+                    };
+
+                    Ok(Stmt {
+                        kind: StmtKind::FieldAssign { name, field, value },
+                        line,
+                    })
+                }
                 _ => Err(Error::new(
                     line,
-                    "only a variable or map lookup can be assigned to",
+                    "only a variable, map entry, or struct field can be assigned to",
                 )),
             };
         }
@@ -436,15 +790,41 @@ impl Parser {
     fn postfix_expression(&mut self) -> Result<Expr, Error> {
         let mut expr = self.primary_expression()?;
 
-        while self.match_kind(&TokenKind::LeftBracket) {
-            self.skip_newlines();
-            let index = self.expression()?;
-            self.skip_newlines();
-            self.consume(&TokenKind::RightBracket, "expected ']' after the index")?;
-            expr = Expr::Index {
-                object: Box::new(expr),
-                index: Box::new(index),
-            };
+        loop {
+            if self.match_kind(&TokenKind::LeftBracket) {
+                self.skip_newlines();
+                let index = self.expression()?;
+                self.skip_newlines();
+                self.consume(&TokenKind::RightBracket, "expected ']' after the index")?;
+                expr = Expr::Index {
+                    object: Box::new(expr),
+                    index: Box::new(index),
+                };
+                continue;
+            }
+
+            if self.match_kind(&TokenKind::Dot) {
+                let name = self.consume_identifier("expected a field or method name after '.'")?;
+
+                if self.match_kind(&TokenKind::LeftParen) {
+                    let args = self.arguments()?;
+                    expr = Expr::Call {
+                        callee: Callee::Method {
+                            receiver: Box::new(expr),
+                            method: name,
+                        },
+                        args,
+                    };
+                } else {
+                    expr = Expr::Field {
+                        object: Box::new(expr),
+                        name,
+                    };
+                }
+                continue;
+            }
+
+            break;
         }
 
         Ok(expr)
@@ -480,19 +860,6 @@ impl Parser {
             }
             TokenKind::Identifier(name) => {
                 self.advance();
-
-                if self.match_kind(&TokenKind::Dot) {
-                    let method = self.consume_identifier("expected a method name after '.'")?;
-                    self.consume(&TokenKind::LeftParen, "expected '(' after the method name")?;
-                    let args = self.arguments()?;
-                    return Ok(Expr::Call {
-                        callee: Callee::Method {
-                            receiver: name,
-                            method,
-                        },
-                        args,
-                    });
-                }
 
                 if self.match_kind(&TokenKind::LeftParen) {
                     let args = self.arguments()?;
@@ -713,6 +1080,28 @@ impl Parser {
     }
 }
 
+fn trim_newlines(tokens: &mut Vec<Token>) {
+    while matches!(
+        tokens.first(),
+        Some(Token {
+            kind: TokenKind::Newline,
+            ..
+        })
+    ) {
+        tokens.remove(0);
+    }
+
+    while matches!(
+        tokens.last(),
+        Some(Token {
+            kind: TokenKind::Newline,
+            ..
+        })
+    ) {
+        tokens.pop();
+    }
+}
+
 fn describe(kind: &TokenKind) -> String {
     match kind {
         TokenKind::Identifier(name) => format!("'{name}'"),
@@ -862,5 +1251,77 @@ mod tests {
         };
         assert_eq!(params.len(), 2);
         assert_eq!(params[1].default, Some(Expr::None));
+    }
+
+    #[test]
+    fn parses_structs_and_impl_methods() {
+        let source = "struct Point {\n    x = 0\n    y = 0\n}\n\
+                      impl Point {\n    def sum(self) {\n        return self.x + self.y\n    }\n}\n\
+                      p = Point(1, 2)\n\
+                      p.x = 3";
+        let statements = Parser::parse(source).unwrap();
+
+        let StmtKind::Struct { name, fields } = &statements[0].kind else {
+            panic!("expected a struct");
+        };
+        assert_eq!(name, "Point");
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].name, "x");
+        assert_eq!(fields[0].default, Some(Expr::Int(0)));
+
+        let StmtKind::Impl { name, methods } = &statements[1].kind else {
+            panic!("expected an impl");
+        };
+        assert_eq!(name, "Point");
+        assert_eq!(methods.len(), 1);
+        assert_eq!(methods[0].name, "sum");
+        assert_eq!(methods[0].params[0].name, "self");
+
+        assert!(matches!(
+            &statements[3].kind,
+            StmtKind::FieldAssign { field, .. } if field == "x"
+        ));
+    }
+
+    #[test]
+    fn impl_methods_must_take_self() {
+        let error = Parser::parse("struct P { x }\nimpl P { def m(a) { return a } }")
+            .unwrap_err();
+        assert!(error.message.contains("must start with 'self'"), "{error}");
+    }
+
+    #[test]
+    fn expands_statement_macros() {
+        let statements = Parser::parse(
+            "macro twice($body) {\n    $body\n    $body\n}\ntwice({ print(1) },)",
+        )
+        .unwrap();
+
+        assert_eq!(statements.len(), 2);
+        let StmtKind::Block(expanded) = &statements[1].kind else {
+            panic!("expected expanded macro statements");
+        };
+        assert_eq!(expanded.len(), 2);
+    }
+
+    #[test]
+    fn macro_argument_count_is_checked() {
+        let error = Parser::parse("macro m($a) { $a }\nm()").unwrap_err();
+        assert!(
+            error.message.contains("takes 1 argument(s), but 0 given"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn unknown_macro_parameters_are_errors() {
+        let error = Parser::parse("macro m($a) { $b }\nm(1)").unwrap_err();
+        assert!(error.message.contains("no parameter '$b'"), "{error}");
+    }
+
+    #[test]
+    fn recursive_macros_stop() {
+        let error = Parser::parse("macro loopy($x) { loopy($x) }\nloopy(1)").unwrap_err();
+        assert!(error.message.contains("expanded too deeply"), "{error}");
     }
 }

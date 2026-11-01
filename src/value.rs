@@ -32,6 +32,7 @@ impl SetItem {
             Value::HashSet(_) => Err("hashset items cannot be another hashset".to_string()),
             Value::Matrix(_) => Err("hashset items cannot be a matrix".to_string()),
             Value::Map(_) => Err("hashset items cannot be a hashmap".to_string()),
+            Value::Struct(_) => Err("hashset items cannot be a struct".to_string()),
             Value::None => Err("hashset items cannot be None".to_string()),
         }
     }
@@ -74,6 +75,12 @@ fn display_key(key: &str) -> String {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct StructValue {
+    pub type_name: String,
+    pub fields: HashMap<String, Value>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Int(i64),
     Float(f64),
@@ -83,13 +90,15 @@ pub enum Value {
     Matrix(HashMap<String, HashMap<String, Value>>),
     /// `{"a": 1}`: Python-style dictionary keyed by hashable scalars.
     Map(HashMap<SetItem, Value>),
+    /// `Point(1, 2)`: a fixed set of named fields, created by `struct`.
+    Struct(StructValue),
     /// Python's `None`: the result of a call that only has side effects, and
     /// what a function returns when it falls off the end.
     None,
 }
 
 impl Value {
-    pub fn type_name(&self) -> &'static str {
+    pub fn type_name(&self) -> &str {
         match self {
             Value::Int(_) => "int",
             Value::Float(_) => "float",
@@ -98,6 +107,7 @@ impl Value {
             Value::HashSet(_) => "hashset",
             Value::Matrix(_) => "matrix",
             Value::Map(_) => "hashmap",
+            Value::Struct(value) => &value.type_name,
             Value::None => "None",
         }
     }
@@ -142,6 +152,15 @@ impl fmt::Display for Value {
                     .collect();
                 parts.sort();
                 write!(f, "{{{}}}", parts.join(", "))
+            }
+            Value::Struct(value) => {
+                let mut fields: Vec<String> = value
+                    .fields
+                    .iter()
+                    .map(|(name, field)| format!("{name}={}", repr_value(field)))
+                    .collect();
+                fields.sort();
+                write!(f, "{}({})", value.type_name, fields.join(", "))
             }
             Value::None => write!(f, "None"),
         }

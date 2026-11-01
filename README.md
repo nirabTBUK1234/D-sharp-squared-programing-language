@@ -3,12 +3,12 @@
 A small, interpreted programming language implemented in Rust. The keywords are
 Pythonic (`def`, `if`/`elif`/`else`, `x = 1`, `True`/`False`/`None`, `#`
 comments) but blocks use braces instead of indentation. It has a real lexer and
-recursive-descent parser, functions with defaults and recursion, loops, three
-compound value types (`hashSet`, `{}` hashmaps, and `mat{}` matrices), console
+recursive-descent parser, functions with defaults and recursion, loops,
+hashsets, hashmaps, matrices, structs with `impl` methods, token macros, console
 built-ins, and a REPL.
 
-It is still an early prototype: no classes, modules, `match`, or closures yet —
-see [Roadmap](#roadmap) and [Known limitations](#known-limitations).
+It is still an early prototype: no modules, `match`/enums, traits, or closures
+yet — see [Roadmap](#roadmap) and [Known limitations](#known-limitations).
 
 - **v1.1.0** — current release (2026-11-01): `hashSet(...)`, `{...}` hashmaps
   with `[ ]` indexing, text indexing, and `mat{...}`-only matrices.
@@ -88,6 +88,7 @@ FizzBuzz
 | Hashset | `hashSet(1, 2, 2)` / `set(1, 2)` | Duplicates collapse; scalars only |
 | Hashmap | `{"a": 1, "b": 2}` | Keys can be int, float, bool, or text; read/write with `[ ]` |
 | Matrix | `mat{row1: {a: 1, b: 2}}` | Named rows of named cells; `matrix`/`matrex` are aliases |
+| Struct | `Point(1, 2)` | Fixed named fields; declared with `struct`, methods with `impl` |
 | None | `None` | Returned by functions that do not return a value |
 
 ### Variables
@@ -171,6 +172,87 @@ print(fact(5))                 # 120
 - Arity is checked: `function 'f' takes 2 argument(s), but 3 given`.
 
 A call scope is created per call; there are no closures yet (see limitations).
+
+### Structs and methods
+
+```text
+struct Point {
+    x = 0
+    y = 0
+}
+
+impl Point {
+    def sum(self) {
+        return self.x + self.y
+    }
+
+    def shift(self, dx, dy) {
+        self.x = self.x + dx
+        self.y = self.y + dy
+        return self
+    }
+}
+
+p = Point(1, 2)
+print(p)            # Point(x=1, y=2)
+print(p.sum())      # 3
+p.x = 10            # fields are mutable
+p.shift(1, 2)       # methods update the receiver
+print(p)            # Point(x=11, y=4)
+q = Point()         # both fields use their defaults
+print(q)            # Point(x=0, y=0)
+```
+
+- `struct Name { field, field = default }` defines a fixed-field record and a
+  constructor function with the same name. Fields without defaults must come
+  before fields with defaults.
+- `Name(...)` builds a value; the argument count is checked (`struct 'Point'
+  takes between 0 and 2 argument(s)`).
+- Reads and writes use `.`: `p.x`, `p.x = 10`. Unknown fields are errors.
+- `impl Name { def method(self, ...) { ... } }` attaches methods. The first
+  parameter must be named `self`; call them with `p.method(...)`.
+- Methods mutate the receiver when called on a variable: `p.shift(1, 2)` writes
+  the final `self` back into `p`. Calls on a temporary or a nested field (e.g.
+  `make_point().shift(...)` or `outer.inner.shift(...)`) still work but the
+  mutation is not written back.
+- Structs are values: `q = p` copies the fields, so `q.x = 1` does not change
+  `p`. Field assignment through the original variable does.
+- There are no traits, generics, visibility modifiers, or type annotations yet.
+
+### Macros
+
+Macros are real token macros: `macro` stores a token body, and each invocation
+substitutes arguments before the expanded code is parsed.
+
+```text
+macro unless($cond, $body) {
+    if not ($cond) {
+        $body
+    }
+}
+
+unless(False, { print("runs") })   # prints runs
+unless(True,  { print("never") })
+
+macro twice($body) {
+    $body
+    $body
+}
+
+twice({ print("hi") })             # prints hi twice
+```
+
+- Define with `macro name($a, $b) { ... }`; parameters must start with `$`.
+- Invoke like a call, in statement position: `name(arg1, arg2)`.
+- Arguments are token groups. They may be expressions, blocks (`{ ... }`), or
+  other fragments, and the expansion is parsed as D#² code.
+- Substitution is textual: wrap expression parameters in parentheses inside the
+  body when precedence matters (`not ($cond)`).
+- There is no hygiene: names introduced by a macro land in the caller's scope.
+- Arguments are evaluated every time they appear, so `twice({ bump() })` runs
+  `bump()` twice.
+- Macros must be defined before use, expand only as statements, and recursive
+  expansion stops after 32 levels.
 
 ### Operators
 
@@ -354,20 +436,30 @@ The REPL prints the same format and keeps going.
   functions (`def`/`return`, defaults, recursion), operators (`and`/`or`/`not`
   plus symbols), `True`/`False`/`None`, `#` comments, and collection literals
   (`hashSet(...)`, `{key: value}` hashmaps with `[ ]` indexing, `mat{...}`).
-- Next: `match`, real closures/lexical scoping, then `class`/`struct`/`impl`,
-  modules, and `try`/`except`/`raise`.
+- Done: `struct` records with defaults, `impl` methods with `self`, and
+  statement token macros (`macro name($a) { ... }`).
+- Next: `match`/enums, closures/lexical scoping, modules (`use`/`import`), then
+  `try`/`except`/`raise`.
 - Built-in methods: only `console.*` (plus `print`/`input`) is implemented; the
   `file`, `data`, `collections`, `query`, `matrex`, `time`, `math`, `game`, and
   `system` groups are not wired up yet.
 
 ## Known limitations
 
-- No classes, modules, `match`, `try`/`except`, or lambdas. `{...}` is a
-  hashmap literal; `mat{...}` is the matrix type.
+- No modules, `match`/enums, traits/generics, `try`/`except`, or lambdas. `{...}`
+  is a hashmap literal; `mat{...}` is the matrix type.
+- No ownership, borrowing, or static types: this is a dynamic interpreter, so
+  Rust's borrow checker has no counterpart here.
 - Functions are dynamically scoped: a called function sees the *caller's*
   variables. There are no closures and no first-class function values yet.
 - No named/keyword arguments at call sites; defaults are positional.
 - No imports.
+- Macros are textual and unhygienic; they only expand in statement position, and
+  a macro name wins over a function of the same name at the start of a statement.
+- Methods write mutations back only when called on a plain variable; nested
+  receivers such as `outer.inner.shift(...)` do not propagate the change.
+- Struct names are constructors, not first-class values: `C = Point` does not
+  work; call `Point(...)` directly.
 - Numeric literals cannot start with a dot (`0.5` works, `.5` does not).
 - A map literal cannot start a statement (that position is a block); assign it
   to a name instead (`d = {}`).
