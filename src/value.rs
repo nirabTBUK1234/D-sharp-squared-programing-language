@@ -40,6 +40,22 @@ fn bool_text(value: bool) -> &'static str {
     if value { "True" } else { "False" }
 }
 
+/// Matrix keys that are not plain identifiers are printed as text literals so
+/// the output can be parsed back in.
+fn display_key(key: &str) -> String {
+    let mut chars = key.chars();
+    let starts_ok = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    let rest_ok = chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+
+    if starts_ok && rest_ok {
+        key.to_string()
+    } else {
+        format!("\"{key}\"")
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Int(i64),
@@ -85,21 +101,21 @@ impl fmt::Display for Value {
             }
             Value::Matrix(rows) => {
                 if rows.is_empty() {
-                    return write!(f, "matrix");
+                    return write!(f, "mat{{}}");
                 }
                 let mut parts: Vec<String> = rows
                     .iter()
                     .map(|(outer, inner)| {
                         let mut cells: Vec<String> = inner
                             .iter()
-                            .map(|(key, value)| format!("{key} {value}"))
+                            .map(|(key, value)| format!("{}: {value}", display_key(key)))
                             .collect();
                         cells.sort();
-                        format!("{outer} {{ {} }}", cells.join(" "))
+                        format!("{}: {{{}}}", display_key(outer), cells.join(", "))
                     })
                     .collect();
                 parts.sort();
-                write!(f, "matrix {}", parts.join(" "))
+                write!(f, "mat{{{}}}", parts.join(", "))
             }
             Value::None => write!(f, "None"),
         }

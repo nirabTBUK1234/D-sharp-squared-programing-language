@@ -80,7 +80,7 @@ FizzBuzz
 | Bool | `True`, `False` | `true`/`false` are also accepted |
 | Text | `"hello"`, `'hi there'` | |
 | Hashset | `hashset 1 2 2` / `set 1 2` | Duplicates collapse; scalars only |
-| Matrix | `matrix row1 { a 1 b 2 } row2 { a 3 }` | Named rows of named values; `matrex` is an alias |
+| Matrix | `mat{row1: {a: 1, b: 2}}` | Named rows of named cells; `matrix`/`matrex` are aliases |
 | None | `None` | Returned by functions that do not return a value |
 
 ### Variables
@@ -195,7 +195,7 @@ so overflow is an error rather than a wrap.
 
 ```text
 nums = hashset 1 2 2 3
-grid = matrix row1 { a 1 b 2 } row2 { a 3 }
+grid = mat{row1: {a: 1, b: 2}, row2: {a: 3}}
 print(nums)
 print(grid)
 ```
@@ -204,13 +204,25 @@ prints:
 
 ```text
 hashset 1 2 3
-matrix row1 { a 1 b 2 } row2 { a 3 }
+mat{row1: {a: 1, b: 2}, row2: {a: 3}}
 ```
 
+A matrix is braces after `mat` (or `matrix` / `matrex`), with rows shaped
+`name: { cell: value, ... }`. Commas between rows and cells are optional, and a
+trailing comma is allowed. Row and cell names are identifiers or text literals,
+and values may themselves be matrices:
+
+```text
+weird = mat{
+    "row 1": {"a b": 1,},
+    outer: {inner: mat{x: {y: 2}}},
+}
+```
+
+The older form is still accepted: `matrix row1 { a 1 b 2 } row2 { a 3 }`.
 Hashset elements must be Int, Float, Bool, or Text — nesting a hashset or matrix
 inside a hashset is an error. Values inside a hashset print in sorted order, but
-iteration order is the hash order. (The `hashset`/`matrix` literal keywords are
-kept because `{ }` already means "block" here.)
+iteration order is the hash order.
 
 ### Console
 
@@ -254,6 +266,7 @@ Printing an empty line: `print("")` (or `console.println("")`).
 | `a is b` / `a is_not b` | `a == b` / `a != b` |
 | `a greater b`, `a less_equal b`, ... | `a > b`, `a <= b`, ... |
 | `else if` | `elif` (`else if` still parses as nested `if`) |
+| `matrix row1 { a 1 b 2 }` | `mat{row1: {a: 1, b: 2}}` (old form still accepted) |
 | `-- comment` | `# comment` |
 | `type Id = int` | removed |
 
@@ -320,11 +333,14 @@ The REPL prints the same format and keeps going.
 
 ## Known limitations
 
-- No classes, modules, `match`, `try`/`except`, lambdas, or list/dict literals.
+- No classes, modules, `match`, `try`/`except`, lambdas, or dict literals
+  (`mat{...}` is the matrix type, not a general dictionary).
 - Functions are dynamically scoped: a called function sees the *caller's*
   variables. There are no closures and no first-class function values yet.
 - No named/keyword arguments at call sites; defaults are positional.
 - No imports.
 - Numeric literals cannot start with a dot (`0.5` works, `.5` does not).
-- `hashset`/`matrix` literals are not Pythonic (braces are used for blocks).
+- `hashset` still uses a keyword prefix (`hashset 1 2 3`); matrices use
+  `mat{...}`, but braces cannot also serve as dict literals because `{ }` means
+  "block" here.
 - `builtin_functions.json` is larger than the implemented surface (see above).

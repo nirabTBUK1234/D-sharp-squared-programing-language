@@ -524,6 +524,10 @@ impl Parser {
     }
 
     fn matrix_literal(&mut self) -> Result<Expr, Error> {
+        if self.check(&TokenKind::LeftBrace) {
+            return self.braced_matrix_literal();
+        }
+
         let mut rows: Vec<(String, Vec<(String, Expr)>)> = Vec::new();
 
         while let TokenKind::Identifier(name) = self.peek().kind.clone() {
@@ -545,6 +549,70 @@ impl Parser {
         }
 
         Ok(Expr::Matrix(rows))
+    }
+
+    /// `mat{row1: {a: 1, b: 2}, row2: {a: 3}}`
+    fn braced_matrix_literal(&mut self) -> Result<Expr, Error> {
+        self.consume(&TokenKind::LeftBrace, "expected '{' after 'mat'")?;
+        self.skip_separators();
+
+        let mut rows: Vec<(String, Vec<(String, Expr)>)> = Vec::new();
+
+        while !self.check(&TokenKind::RightBrace) && !self.check(&TokenKind::Eof) {
+            let name = self.matrix_key("expected a row name")?;
+            self.consume(&TokenKind::Colon, "expected ':' after the row name")?;
+            let cells = self.matrix_cells()?;
+            rows.push((name, cells));
+
+            self.skip_newlines();
+            self.match_kind(&TokenKind::Comma);
+            self.skip_separators();
+        }
+
+        self.consume(&TokenKind::RightBrace, "expected '}' to close the matrix")?;
+        Ok(Expr::Matrix(rows))
+    }
+
+    fn matrix_cells(&mut self) -> Result<Vec<(String, Expr)>, Error> {
+        self.skip_newlines();
+        self.consume(
+            &TokenKind::LeftBrace,
+            "expected '{' to start a matrix row",
+        )?;
+        self.skip_separators();
+
+        let mut cells: Vec<(String, Expr)> = Vec::new();
+
+        while !self.check(&TokenKind::RightBrace) && !self.check(&TokenKind::Eof) {
+            let key = self.matrix_key("expected a cell name")?;
+            self.consume(&TokenKind::Colon, "expected ':' after the cell name")?;
+            let value = self.expression()?;
+            cells.push((key, value));
+
+            self.skip_newlines();
+            self.match_kind(&TokenKind::Comma);
+            self.skip_separators();
+        }
+
+        self.consume(&TokenKind::RightBrace, "expected '}' to close the matrix row")?;
+        Ok(cells)
+    }
+
+    fn matrix_key(&mut self, message: &str) -> Result<String, Error> {
+        match self.peek().kind.clone() {
+            TokenKind::Identifier(name) => {
+                self.advance();
+                Ok(name)
+            }
+            TokenKind::Text(text) => {
+                self.advance();
+                Ok(text)
+            }
+            other => Err(Error::new(
+                self.peek().line,
+                format!("{message}, found {}", describe(&other)),
+            )),
+        }
     }
 
     fn starts_value(&self) -> bool {
@@ -742,6 +810,19 @@ mod tests {
     fn statements_need_a_separator() {
         let error = Parser::parse("x = 1 y = 2").unwrap_err();
         assert!(error.message.contains("after a statement"), "{error}");
+    }
+
+    #[test]
+    fn parses_braced_matrix_literal() {
+        let expr = expression_of("mat{row1: {a: 1, b: 2}, row2: {a: 3}}");
+        let Expr::Matrix(rows) = expr else {
+            panic!("expected a matrix");
+        };
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "row1");
+        assert_eq!(rows[0].1.len(), 2);
+        assert_eq!(rows[1].0, "row2");
     }
 
     #[test]

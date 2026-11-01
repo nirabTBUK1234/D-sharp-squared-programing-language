@@ -11,6 +11,7 @@ pub enum TokenKind {
     LeftParen,
     RightParen,
     Comma,
+    Colon,
     Semicolon,
     Newline,
     Dot,
@@ -100,6 +101,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Error> {
             '(' => single(&mut chars, &mut tokens, TokenKind::LeftParen, token_line),
             ')' => single(&mut chars, &mut tokens, TokenKind::RightParen, token_line),
             ',' => single(&mut chars, &mut tokens, TokenKind::Comma, token_line),
+            ':' => single(&mut chars, &mut tokens, TokenKind::Colon, token_line),
             ';' => single(&mut chars, &mut tokens, TokenKind::Semicolon, token_line),
             '.' => single(&mut chars, &mut tokens, TokenKind::Dot, token_line),
             '+' => single(&mut chars, &mut tokens, TokenKind::Plus, token_line),
@@ -261,7 +263,7 @@ fn keyword(word: &str) -> TokenKind {
         "False" | "false" => TokenKind::False,
         "None" | "none" => TokenKind::None,
         "hashset" | "set" => TokenKind::Hashset,
-        "matrix" | "matrex" => TokenKind::Matrix,
+        "matrix" | "mat" | "matrex" => TokenKind::Matrix,
         "and" => TokenKind::And,
         "or" => TokenKind::Or,
         "not" => TokenKind::Not,
@@ -393,6 +395,26 @@ mod tests {
                 TokenKind::True,
                 TokenKind::False,
                 TokenKind::None,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_matrix_literal_tokens() {
+        assert_eq!(
+            kinds("mat{r: {a: 1}}"),
+            vec![
+                TokenKind::Matrix,
+                TokenKind::LeftBrace,
+                TokenKind::Identifier("r".into()),
+                TokenKind::Colon,
+                TokenKind::LeftBrace,
+                TokenKind::Identifier("a".into()),
+                TokenKind::Colon,
+                TokenKind::Int(1),
+                TokenKind::RightBrace,
+                TokenKind::RightBrace,
                 TokenKind::Eof,
             ]
         );

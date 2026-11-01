@@ -1059,6 +1059,39 @@ mod tests {
     }
 
     #[test]
+    fn braced_matrix_literals() {
+        let env = env_after(
+            "grid = mat{row1: {a: 1, b: 2}, row2: {a: 3}}\n\
+             nested = mat{outer: {inner: mat{x: {y: 2}}}, \"row 1\": {\"a b\": 1,},}",
+        );
+
+        match env.get_value("grid").unwrap() {
+            Value::Matrix(rows) => {
+                assert_eq!(rows["row1"]["a"], Value::Int(1));
+                assert_eq!(rows["row1"]["b"], Value::Int(2));
+                assert_eq!(rows["row2"]["a"], Value::Int(3));
+            }
+            other => panic!("expected matrix, got {other:?}"),
+        }
+
+        match env.get_value("nested").unwrap() {
+            Value::Matrix(rows) => {
+                match &rows["outer"]["inner"] {
+                    Value::Matrix(inner) => assert_eq!(inner["x"]["y"], Value::Int(2)),
+                    other => panic!("expected a nested matrix, got {other:?}"),
+                }
+                assert_eq!(rows["row 1"]["a b"], Value::Int(1));
+            }
+            other => panic!("expected matrix, got {other:?}"),
+        }
+
+        assert_eq!(
+            env.get_value("grid").unwrap().to_string(),
+            "mat{row1: {a: 1, b: 2}, row2: {a: 3}}"
+        );
+    }
+
+    #[test]
     fn hashset_and_matrix_still_work() {
         let env = env_after(
             "nums = hashset 1 2 2\n\
