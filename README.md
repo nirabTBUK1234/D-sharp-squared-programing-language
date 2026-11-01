@@ -10,6 +10,8 @@ built-ins, and a REPL.
 It is still an early prototype: no classes, modules, `match`, or closures yet —
 see [Roadmap](#roadmap) and [Known limitations](#known-limitations).
 
+- **v1.1.0** — current release (2026-11-01): `hashSet(...)`, `{...}` hashmaps
+  with `[ ]` indexing, text indexing, and `mat{...}`-only matrices.
 - **v1.0.0** — first stable release (2026-11-01); see
   [CHANGELOG.md](CHANGELOG.md). The earlier tags
   (`PreReleace1OfV1.0`, `PreReleace2OfV1`) were pre-releases.
