@@ -1,5 +1,7 @@
 # D#² (D-sharp-squared)
 
+"""
+
 A small, interpreted programming language implemented in Rust. The keywords are
 Pythonic (`def`, `if`/`elif`/`else`, `x = 1`, `True`/`False`/`None`, `#`
 comments) but blocks use braces instead of indentation. It has a real lexer and
@@ -22,7 +24,11 @@ It is still an early prototype: no modules, `match`/enums, or closures yet — s
 - Rust 2024 edition (Rust 1.85+)
 - Source: <https://github.com/nirabTBUK1234/D-sharp-squared-programing-language>
 
+"""
+
 ## Build and run
+
+"""
 
 ```bash
 cargo build
@@ -31,7 +37,11 @@ cargo run                  # start the REPL
 cargo test                 # run the test suite
 ```
 
+"""
+
 ## Quick start
+
+"""
 
 `fizzbuzz.dsq`:
 
@@ -67,9 +77,19 @@ Buzz
 FizzBuzz
 ```
 
+"""
+
 ## Language reference
 
+"""
+The language reference is organized by construct: statements, values, variables,
+control flow, functions, structs, traits, macros, operators, collections, and
+console built-ins.
+"""
+
 ### Statements
+
+"""
 
 - Statements end at a newline or `;`.
 - `{ ... }` groups statements into a block.
@@ -80,7 +100,11 @@ FizzBuzz
   ignored (it catches leftovers from the old `let` syntax):
   `unexpected 'x' after a statement (missing a newline or ';'?)`.
 
+"""
+
 ### Values
+
+"""
 
 | Type | Examples | Notes |
 |---|---|---|
@@ -94,7 +118,11 @@ FizzBuzz
 | Struct | `Point(1, 2)` | Fixed named fields; declared with `struct`, methods with `impl`, behavior with traits |
 | None | `None` | Returned by functions that do not return a value |
 
+"""
+
 ### Variables
+
+"""
 
 Assigning creates the name; there are no declaration keywords:
 
@@ -111,7 +139,11 @@ del name           # remove it again
   afterwards, and assignment updates the nearest existing binding.
 - Reading an unknown name is an error: `unknown variable 'missing'`.
 
+"""
+
 ### Control flow
+
+"""
 
 ```text
 if score >= 90 {
@@ -146,7 +178,11 @@ for ch in "abc" {
 - `loop { }` is a convenience for `while True` and is the one non-Python
   control-flow keyword kept as an extension.
 
+"""
+
 ### Functions
+
+"""
 
 ```text
 def greet(name, punctuation = "!") {
@@ -176,7 +212,11 @@ print(fact(5))                 # 120
 
 A call scope is created per call; there are no closures yet (see limitations).
 
+"""
+
 ### Structs and methods
+
+"""
 
 ```text
 struct Point {
@@ -222,7 +262,11 @@ print(q)            # Point(x=0, y=0)
   `p`. Field assignment through the original variable does.
 - There are no generic structs, visibility modifiers, or type annotations yet.
 
+"""
+
 ### Traits
+
+"""
 
 A trait is a named set of methods. A method without a body is required; a
 method with a body is a default that implementations inherit.
@@ -282,7 +326,11 @@ s.describe()        # square with side 3
   annotations or `is` checks. A trait with no methods is a marker.
 - The trait and the struct must be defined before the `impl` runs.
 
+"""
+
 #### Trait-bounded functions
+
+"""
 
 Functions can require that their leading arguments are structs implementing a
 trait. Type parameters go in `<...>` after the function name:
@@ -313,7 +361,11 @@ show(42)          # error: argument 'value' must implement trait 'Shape'
 - Only free functions take type parameters for now; methods keep the
   `def method(self, ...)` form.
 
+"""
+
 ### Macros
+
+"""
 
 Macros are real token macros: `macro` stores a token body, and each invocation
 substitutes arguments before the expanded code is parsed. Invoke them with a
@@ -351,7 +403,11 @@ twice$({ print("hi") })             # prints hi twice
 - Macros must be defined before use, expand only as statements, and recursive
   expansion stops after 32 levels.
 
+"""
+
 ### Operators
+
+"""
 
 Lowest to highest precedence:
 
@@ -377,7 +433,11 @@ Notes: `and`/`or` require bools; comparisons work on numbers and texts; dividing
 by zero is a runtime error; `1 == 1.0` is true; integer arithmetic is checked,
 so overflow is an error rather than a wrap.
 
+"""
+
 ### Collections
+
+"""
 
 ```text
 nums = hashSet(1, 2, 2, 3)
@@ -430,7 +490,11 @@ weird = mat{
 `"abc"[-1]` is `"c"`). `for` iterates hashset items, hashmap keys, matrix row
 names, or text characters.
 
+"""
+
 ### Console
+
+"""
 
 The `console` methods come from `src/builtin_functions.json`:
 
@@ -459,7 +523,11 @@ print("Hi " + name)
 
 Printing an empty line: `print("")` (or `console.println("")`).
 
+"""
+
 ## Migrating from the earlier Rust-like syntax
+
+"""
 
 | Old | New |
 |---|---|
@@ -477,7 +545,11 @@ Printing an empty line: `print("")` (or `console.println("")`).
 | `-- comment` | `# comment` |
 | `type Id = int` | removed |
 
+"""
+
 ## REPL
+
+"""
 
 `cargo run` with no arguments starts the prompt:
 
@@ -497,7 +569,11 @@ Printing an empty line: `print("")` (or `console.println("")`).
 - Empty lines just re-prompt.
 - Piped input works too: `printf 'print("hi")\n' | cargo run`.
 
+"""
+
 ## Errors
+
+"""
 
 Parsing and runtime errors stop the script and report the source line:
 
@@ -511,7 +587,11 @@ ERROR: line 1: unexpected 'x' after a statement (missing a newline or ';'?)
 
 The REPL prints the same format and keeps going.
 
+"""
+
 ## Project layout
+
+"""
 
 | Path | Purpose |
 |---|---|
@@ -524,7 +604,11 @@ The REPL prints the same format and keeps going.
 | `src/value.rs` | `Value` / `SetItem` types and display rules |
 | `src/builtin_functions.json` | Planned language keyword/built-in → Rust mapping |
 
+"""
+
 ## Roadmap
+
+"""
 
 `builtin_functions.json` lists the intended keyword set. Progress:
 
@@ -543,7 +627,11 @@ The REPL prints the same format and keeps going.
   `file`, `data`, `collections`, `query`, `matrex`, `time`, `math`, `game`, and
   `system` groups are not wired up yet.
 
+"""
+
 ## Known limitations
+
+"""
 
 - No modules, `match`/enums, `try`/`except`, or lambdas. `{...}`
   is a hashmap literal; `mat{...}` is the matrix type.
@@ -572,3 +660,5 @@ The REPL prints the same format and keeps going.
   like `d["a"]["b"] = 1` are not supported.
 - Hashmap display is sorted, not insertion-ordered.
 - `builtin_functions.json` is larger than the implemented surface (see above).
+
+"""

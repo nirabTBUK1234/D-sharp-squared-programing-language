@@ -1,8 +1,20 @@
 # Changelog
 
+"""
+Release history for D#².
+
+Each release lists the language changes and the notes that matter for users.
+"""
+
 ## v1.2.0 — 2026-11-02
 
+"""
+Structs, traits, and macros release.
+"""
+
 ### Language
+
+"""
 
 - `struct Name { field, field = default }` defines a fixed-field record with a
   constructor of the same name; fields are read and written with `.`.
@@ -25,7 +37,11 @@
   and expand at most 32 levels deep.
 - Struct display is `Point(x=1, y=2)`.
 
+"""
+
 ### Notes
+
+"""
 
 - No generic structs, generic methods, visibility, `match`/enums, or
   ownership/borrowing; the last one has no meaning in a dynamically typed
@@ -36,9 +52,17 @@
   bare `name(...)` is a normal function call, so macros and functions can share
   names.
 
+"""
+
 ## v1.1.0 — 2026-11-01
 
+"""
+Collection syntax release.
+"""
+
 ### Language
+
+"""
 
 - `hashSet(1, 2, 3)` constructs a hashset (`set`/`hashset` aliases); the old
   `hashset 1 2 3` literal syntax is gone. Hashsets print as `hashSet(...)`.
@@ -51,18 +75,34 @@
   literal now.
 - Matrix display was already `mat{...}`; hashmap display is `{...}`.
 
+"""
+
 ### Notes
+
+"""
 
 - Map literals cannot start a statement (that position is a block): use
   `d = {}`.
 - Index assignment needs a variable base; `d["a"]["b"] = 1` is not supported.
 
+"""
+
 ## v1.0.0 — 2026-11-01
+
+"""
+First stable release.
+"""
+
+"""
 
 The first stable release. It replaces the earlier pre-releases
 (`PreReleace1OfV1.0`, `PreReleace2OfV1`).
 
+"""
+
 ### Language
+
+"""
 
 - Pythonic keywords with braced blocks instead of indentation.
 - Plain assignment: `x = 1` creates the name; `del x` removes it.
@@ -83,10 +123,16 @@ The first stable release. It replaces the earlier pre-releases
 - REPL with persistent state and multi-line blocks.
 - Parser and runtime errors report the source line.
 
+"""
+
 ### Notes
+
+"""
 
 - No classes, modules, `match`, `try`/`except`, closures, or list/dict
   literals yet.
 - Functions are dynamically scoped.
 - The old Rust-like `let`/`mut`/`fn` syntax from the pre-releases no longer
   parses; the README has a migration table.
+
+"""
