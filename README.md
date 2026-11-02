@@ -222,7 +222,8 @@ print(q)            # Point(x=0, y=0)
 ### Macros
 
 Macros are real token macros: `macro` stores a token body, and each invocation
-substitutes arguments before the expanded code is parsed.
+substitutes arguments before the expanded code is parsed. Invoke them with a
+`$` after the name, like Rust's `!`:
 
 ```text
 macro unless($cond, $body) {
@@ -231,25 +232,27 @@ macro unless($cond, $body) {
     }
 }
 
-unless(False, { print("runs") })   # prints runs
-unless(True,  { print("never") })
+unless$(False, { print("runs") })   # prints runs
+unless$(True,  { print("never") })
 
 macro twice($body) {
     $body
     $body
 }
 
-twice({ print("hi") })             # prints hi twice
+twice$({ print("hi") })             # prints hi twice
 ```
 
 - Define with `macro name($a, $b) { ... }`; parameters must start with `$`.
-- Invoke like a call, in statement position: `name(arg1, arg2)`.
+- Invoke in statement position as `name$(arg1, arg2)`. The `$` marks it as a
+  macro; a bare `name(...)` is always a normal function call, so a macro and a
+  function can share a name.
 - Arguments are token groups. They may be expressions, blocks (`{ ... }`), or
   other fragments, and the expansion is parsed as D#² code.
 - Substitution is textual: wrap expression parameters in parentheses inside the
   body when precedence matters (`not ($cond)`).
 - There is no hygiene: names introduced by a macro land in the caller's scope.
-- Arguments are evaluated every time they appear, so `twice({ bump() })` runs
+- Arguments are evaluated every time they appear, so `twice$({ bump() })` runs
   `bump()` twice.
 - Macros must be defined before use, expand only as statements, and recursive
   expansion stops after 32 levels.
@@ -437,7 +440,7 @@ The REPL prints the same format and keeps going.
   plus symbols), `True`/`False`/`None`, `#` comments, and collection literals
   (`hashSet(...)`, `{key: value}` hashmaps with `[ ]` indexing, `mat{...}`).
 - Done: `struct` records with defaults, `impl` methods with `self`, and
-  statement token macros (`macro name($a) { ... }`).
+  statement token macros (`macro name($a) { ... }`, called with `name$(...)`).
 - Next: `match`/enums, closures/lexical scoping, modules (`use`/`import`), then
   `try`/`except`/`raise`.
 - Built-in methods: only `console.*` (plus `print`/`input`) is implemented; the
@@ -454,8 +457,8 @@ The REPL prints the same format and keeps going.
   variables. There are no closures and no first-class function values yet.
 - No named/keyword arguments at call sites; defaults are positional.
 - No imports.
-- Macros are textual and unhygienic; they only expand in statement position, and
-  a macro name wins over a function of the same name at the start of a statement.
+- Macros are textual and unhygienic; they only expand in statement position and
+  must be invoked with `name$(...)`.
 - Methods write mutations back only when called on a plain variable; nested
   receivers such as `outer.inner.shift(...)` do not propagate the change.
 - Struct names are constructors, not first-class values: `C = Point` does not

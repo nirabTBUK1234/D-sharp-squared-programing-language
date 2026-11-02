@@ -1800,8 +1800,8 @@ mod tests {
              }\n\
              }\n\
              result = 0\n\
-             unless(False, { result = 1 })\n\
-             unless(True, { result = 2 })",
+             unless$(False, { result = 1 })\n\
+             unless$(True, { result = 2 })",
         );
 
         assert_eq!(env.get_value("result").unwrap(), Value::Int(1));
@@ -1816,7 +1816,7 @@ mod tests {
              $body\n\
              $body\n\
              }\n\
-             twice({ bump() })",
+             twice$({ bump() })",
         );
 
         assert_eq!(env.get_value("counter").unwrap(), Value::Int(2));

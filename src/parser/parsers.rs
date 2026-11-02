@@ -133,8 +133,18 @@ impl Parser {
                     line,
                 })
             }
-            TokenKind::Identifier(name) if self.macros.contains_key(&name) => {
-                self.advance();
+            TokenKind::Identifier(name) if self.next_is(&TokenKind::Dollar) => {
+                if !self.macros.contains_key(&name) {
+                    return Err(Error::new(
+                        line,
+                        format!(
+                            "unknown macro '{name}' (define it with 'macro {name}(...)' first)"
+                        ),
+                    ));
+                }
+
+                self.advance(); // the macro name
+                self.advance(); // '$'
                 self.expand_macro(&name, line)
             }
             _ => self.expression_statement(line),
@@ -308,11 +318,20 @@ impl Parser {
                     "macro parameters must start with '$'",
                 )?;
                 let param = self.consume_identifier("expected a parameter name after '$'")?;
+                if params.contains(&param) {
+                    return Err(Error::new(
+                        self.peek().line,
+                        format!("duplicate macro parameter '${param}'"),
+                    ));
+                }
                 params.push(param);
                 self.skip_newlines();
 
                 if self.match_kind(&TokenKind::Comma) {
                     self.skip_newlines();
+                    if self.check(&TokenKind::RightParen) {
+                        break;
+                    }
                     continue;
                 }
                 break;
@@ -383,11 +402,13 @@ impl Parser {
                         kind: TokenKind::Identifier(param),
                         ..
                     }) => param,
+                    // `name$(` is a nested macro call, not a parameter.
                     _ => {
-                        return Err(Error::new(
-                            token.line,
-                            "expected a macro parameter name after '$'",
-                        ));
+                        let mut token = token.clone();
+                        token.line = line;
+                        expanded.push(token);
+                        index += 1;
+                        continue;
                     }
                 };
 
@@ -859,6 +880,15 @@ impl Parser {
                 Ok(Expr::Text(text))
             }
             TokenKind::Identifier(name) => {
+                if self.next_is(&TokenKind::Dollar) {
+                    return Err(Error::new(
+                        line,
+                        format!(
+                            "macro '{name}' can only be used as a statement: put '{name}$(...)' on its own line"
+                        ),
+                    ));
+                }
+
                 self.advance();
 
                 if self.match_kind(&TokenKind::LeftParen) {
@@ -1027,6 +1057,12 @@ impl Parser {
         } else {
             false
         }
+    }
+
+    fn next_is(&self, kind: &TokenKind) -> bool {
+        self.tokens
+            .get(self.current + 1)
+            .is_some_and(|token| std::mem::discriminant(&token.kind) == std::mem::discriminant(kind))
     }
 
     fn consume(&mut self, kind: &TokenKind, message: &str) -> Result<Token, Error> {
@@ -1293,7 +1329,7 @@ mod tests {
     #[test]
     fn expands_statement_macros() {
         let statements = Parser::parse(
-            "macro twice($body) {\n    $body\n    $body\n}\ntwice({ print(1) },)",
+            "macro twice($body,) {\n    $body\n    $body\n}\ntwice$({ print(1) },)",
         )
         .unwrap();
 
@@ -1306,7 +1342,7 @@ mod tests {
 
     #[test]
     fn macro_argument_count_is_checked() {
-        let error = Parser::parse("macro m($a) { $a }\nm()").unwrap_err();
+        let error = Parser::parse("macro m($a) { $a }\nm$()").unwrap_err();
         assert!(
             error.message.contains("takes 1 argument(s), but 0 given"),
             "{error}"
@@ -1315,13 +1351,25 @@ mod tests {
 
     #[test]
     fn unknown_macro_parameters_are_errors() {
-        let error = Parser::parse("macro m($a) { $b }\nm(1)").unwrap_err();
+        let error = Parser::parse("macro m($a) { $b }\nm$(1)").unwrap_err();
         assert!(error.message.contains("no parameter '$b'"), "{error}");
     }
 
     #[test]
     fn recursive_macros_stop() {
-        let error = Parser::parse("macro loopy($x) { loopy($x) }\nloopy(1)").unwrap_err();
+        let error = Parser::parse("macro loopy($x) { loopy$($x) }\nloopy$(1)").unwrap_err();
         assert!(error.message.contains("expanded too deeply"), "{error}");
+    }
+
+    #[test]
+    fn macro_calls_need_the_dollar_suffix() {
+        let error = Parser::parse("nope$(1)").unwrap_err();
+        assert!(error.message.contains("unknown macro 'nope'"), "{error}");
+
+        let error = Parser::parse("macro m($a) { $a }\nx = m$(1)").unwrap_err();
+        assert!(
+            error.message.contains("can only be used as a statement"),
+            "{error}"
+        );
     }
 }

@@ -9,17 +9,20 @@
 - `impl Name { def method(self, ...) { ... } }` attaches methods. Methods mutate
   the receiver when called on a variable, Python-style, and must take `self`
   first.
-- `macro name($a, $b) { ... }` defines a token macro; invoking it in statement
-  position substitutes the argument tokens and parses the expansion. Macros must
-  be defined before use, are unhygienic, and expand at most 32 levels deep.
+- `macro name($a, $b) { ... }` defines a token macro, invoked with `name$(...)`
+  in statement position; the `$` marks the call as a macro, like Rust's `!`, so
+  a macro and a function can share a name. Arguments are substituted textually
+  and the expansion is parsed. Macros must be defined before use, are unhygienic,
+  and expand at most 32 levels deep.
 - Struct display is `Point(x=1, y=2)`.
 
 ### Notes
 
 - No traits, generics, visibility, `match`/enums, or ownership/borrowing; the
   last one has no meaning in a dynamically typed interpreter.
-- Macros work only in statement position and a macro name shadows a function of
-  the same name at the start of a statement.
+- Macros work only in statement position and are called with `name$(...)`; a
+  bare `name(...)` is a normal function call, so macros and functions can share
+  names.
 
 ## v1.1.0 — 2026-11-01
 
