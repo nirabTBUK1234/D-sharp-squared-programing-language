@@ -10,8 +10,11 @@ trait-bounded functions, token macros, console built-ins, and a REPL.
 It is still an early prototype: no modules, `match`/enums, or closures yet — see
 [Roadmap](#roadmap) and [Known limitations](#known-limitations).
 
-- **v1.1.0** — current release (2026-11-01): `hashSet(...)`, `{...}` hashmaps
-  with `[ ]` indexing, text indexing, and `mat{...}`-only matrices.
+- **v1.2.0** — current release (2026-11-02): structs with default fields, `impl`
+  methods, traits with required/default methods, trait-bounded functions, and
+  `name$(...)` token macros.
+- **v1.1.0** — collection syntax release (2026-11-01): `hashSet(...)`, `{...}`
+  hashmaps with `[ ]` indexing, text indexing, and `mat{...}`-only matrices.
 - **v1.0.0** — first stable release (2026-11-01); see
   [CHANGELOG.md](CHANGELOG.md). The earlier tags
   (`PreReleace1OfV1.0`, `PreReleace2OfV1`) were pre-releases.

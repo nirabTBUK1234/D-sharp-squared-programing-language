@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.2.0 — 2026-11-02
 
 ### Language
 
@@ -27,8 +27,9 @@
 
 ### Notes
 
-- No generics, visibility, `match`/enums, or ownership/borrowing; the last one
-  has no meaning in a dynamically typed interpreter.
+- No generic structs, generic methods, visibility, `match`/enums, or
+  ownership/borrowing; the last one has no meaning in a dynamically typed
+  interpreter.
 - Traits are interfaces plus defaults, not runtime types: there are no type
   annotations, trait objects, or `is` checks.
 - Macros work only in statement position and are called with `name$(...)`; a
