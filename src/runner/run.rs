@@ -7,7 +7,9 @@ use std::{
 };
 
 use crate::error::Error;
-use crate::parser::ast::{BinaryOp, Callee, Expr, Method, Parameter, Stmt, StmtKind, UnaryOp};
+use crate::parser::ast::{
+    BinaryOp, Callee, Expr, Method, Parameter, Stmt, StmtKind, TypeParameter, UnaryOp,
+};
 use crate::parser::parsers::Parser;
 use crate::value::{SetItem, StructValue, Value};
 
@@ -45,6 +47,7 @@ pub struct Env {
 }
 
 struct Function {
+    type_params: Vec<TypeParameter>,
     params: Vec<Parameter>,
     body: Vec<Stmt>,
 }
@@ -111,8 +114,18 @@ impl Env {
         self.traits.pop();
     }
 
-    pub fn define_function(&mut self, name: String, params: Vec<Parameter>, body: Vec<Stmt>) {
-        let function = Rc::new(Function { params, body });
+    pub fn define_function(
+        &mut self,
+        name: String,
+        type_params: Vec<TypeParameter>,
+        params: Vec<Parameter>,
+        body: Vec<Stmt>,
+    ) {
+        let function = Rc::new(Function {
+            type_params,
+            params,
+            body,
+        });
         self.functions
             .last_mut()
             .expect("there is always a scope")
@@ -387,6 +400,7 @@ impl<'a> Interpreter<'a> {
                     None => {
                         for method in methods {
                             let function = Rc::new(Function {
+                                type_params: Vec::new(),
                                 params: method.params.clone(),
                                 body: method.body.clone(),
                             });
@@ -408,9 +422,18 @@ impl<'a> Interpreter<'a> {
                     .map_err(|message| Error::new(line, message))?;
                 Ok(Flow::Normal)
             }
-            StmtKind::Function { name, params, body } => {
-                self.env
-                    .define_function(name.clone(), params.clone(), body.clone());
+            StmtKind::Function {
+                name,
+                type_params,
+                params,
+                body,
+            } => {
+                self.env.define_function(
+                    name.clone(),
+                    type_params.clone(),
+                    params.clone(),
+                    body.clone(),
+                );
                 Ok(Flow::Normal)
             }
             StmtKind::Return(value) => {
@@ -800,6 +823,7 @@ impl<'a> Interpreter<'a> {
             provided.insert(
                 method.name.clone(),
                 Rc::new(Function {
+                    type_params: Vec::new(),
                     params: method.params.clone(),
                     body: method.body.clone(),
                 }),
@@ -816,6 +840,7 @@ impl<'a> Interpreter<'a> {
                 final_methods.push((
                     method_name.clone(),
                     Rc::new(Function {
+                        type_params: Vec::new(),
                         params: trait_method.params.clone(),
                         body: body.clone(),
                     }),
@@ -946,21 +971,25 @@ impl<'a> Interpreter<'a> {
 
         let result = match self.bind_parameters(function, values, line) {
             Ok(()) => {
-                let loop_depth = std::mem::replace(&mut self.loop_depth, 0);
-                self.function_depth += 1;
+                if let Err(error) = self.check_type_bounds(function, label, line) {
+                    Err(error)
+                } else {
+                    let loop_depth = std::mem::replace(&mut self.loop_depth, 0);
+                    self.function_depth += 1;
 
-                let flow = self.exec_statements(&function.body);
+                    let flow = self.exec_statements(&function.body);
 
-                self.loop_depth = loop_depth;
-                self.function_depth -= 1;
+                    self.loop_depth = loop_depth;
+                    self.function_depth -= 1;
 
-                match flow? {
-                    Flow::Return(value) => Ok(value),
-                    Flow::Normal => Ok(Value::None),
-                    Flow::Break | Flow::Continue => Err(Error::new(
-                        line,
-                        "'break' or 'continue' escaped a function body",
-                    )),
+                    match flow? {
+                        Flow::Return(value) => Ok(value),
+                        Flow::Normal => Ok(Value::None),
+                        Flow::Break | Flow::Continue => Err(Error::new(
+                            line,
+                            "'break' or 'continue' escaped a function body",
+                        )),
+                    }
                 }
             }
             Err(error) => Err(error),
@@ -969,6 +998,73 @@ impl<'a> Interpreter<'a> {
         let final_self = self.env.get_value("self").ok();
         self.env.pop_scope();
         result.map(|value| (value, final_self))
+    }
+
+    fn check_type_bounds(
+        &self,
+        function: &Function,
+        label: &str,
+        line: usize,
+    ) -> Result<(), Error> {
+        for (index, type_param) in function.type_params.iter().enumerate() {
+            let Some(bound) = &type_param.bound else {
+                continue;
+            };
+            let Some(param) = function.params.get(index) else {
+                return Err(Error::new(
+                    line,
+                    format!(
+                        "type parameter '{}' has no matching parameter",
+                        type_param.name
+                    ),
+                ));
+            };
+
+            if self.env.get_trait(bound).is_none() {
+                return Err(Error::new(
+                    line,
+                    format!("{label} uses unknown trait '{bound}' in its type bound"),
+                ));
+            }
+
+            let value = self
+                .env
+                .get_value(&param.name)
+                .map_err(|message| Error::new(line, message))?;
+
+            match value {
+                Value::Struct(struct_value) => {
+                    let Some(definition) = self.env.get_struct(&struct_value.type_name) else {
+                        return Err(Error::new(
+                            line,
+                            format!("unknown struct '{}'", struct_value.type_name),
+                        ));
+                    };
+
+                    if !definition.traits.contains(bound) {
+                        return Err(Error::new(
+                            line,
+                            format!(
+                                "argument '{}' to {label} must implement trait '{bound}', but struct '{}' does not",
+                                param.name, struct_value.type_name
+                            ),
+                        ));
+                    }
+                }
+                other => {
+                    return Err(Error::new(
+                        line,
+                        format!(
+                            "argument '{}' to {label} must implement trait '{bound}', got {}",
+                            param.name,
+                            other.type_name()
+                        ),
+                    ));
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn bind_parameters(
@@ -2136,6 +2232,69 @@ mod tests {
             "{error}"
         );
         assert_eq!(error.line, 5);
+    }
+
+    #[test]
+    fn functions_can_require_trait_bounds() {
+        let env = env_after(
+            "trait Shape {\n\
+             def area(self)\n\
+             }\n\
+             struct Circle { radius }\n\
+             impl Shape for Circle {\n\
+             def area(self) { return self.radius }\n\
+             }\n\
+             def total<T: Shape, U: Shape>(first, second = Circle(1)) {\n\
+             return first.area() * 10 + second.area()\n\
+             }\n\
+             circle_total = total(Circle(2), Circle(3))\n\
+             default_total = total(Circle(4))\n\
+             def identity<T>(value) { return value }\n\
+             plain = identity(5)",
+        );
+
+        assert_eq!(env.get_value("circle_total").unwrap(), Value::Int(23));
+        assert_eq!(env.get_value("default_total").unwrap(), Value::Int(41));
+        assert_eq!(env.get_value("plain").unwrap(), Value::Int(5));
+    }
+
+    #[test]
+    fn function_trait_bound_errors_report_the_line() {
+        let error = error_of(
+            "trait Shape { def area(self) }\n\
+             struct Plain { x = 1 }\n\
+             def show<T: Shape>(value) { return value }\n\
+             show(Plain())",
+        );
+        assert!(
+            error
+                .message
+                .contains("argument 'value' to function 'show' must implement trait 'Shape'"),
+            "{error}"
+        );
+        assert!(error.message.contains("struct 'Plain' does not"), "{error}");
+        assert_eq!(error.line, 4);
+
+        let error = error_of(
+            "trait Shape { def area(self) }\n\
+             def show<T: Shape>(value) { return value }\n\
+             show(42)",
+        );
+        assert!(
+            error.message.contains("must implement trait 'Shape', got int"),
+            "{error}"
+        );
+        assert_eq!(error.line, 3);
+
+        let error = error_of(
+            "def show<T: Missing>(value) { return value }\n\
+             show(1)",
+        );
+        assert!(
+            error.message.contains("unknown trait 'Missing'"),
+            "{error}"
+        );
+        assert_eq!(error.line, 2);
     }
 
     #[test]

@@ -14,6 +14,10 @@
   are checked at impl time, defaults are inherited or overridden, and dispatch
   checks inherent methods before trait methods. A trait can be implemented once
   per struct; two traits cannot supply the same method name.
+- `def name<T: Trait>(value)` declares a trait-bounded function. At each call,
+  the leading value parameters must be structs implementing their bound. Type
+  parameters are positional; `<T>` without a bound is accepted but has no runtime
+  effect. Only free functions support this for now.
 - `macro name($a, $b) { ... }` defines a token macro, invoked with `name$(...)`
   in statement position; the `$` marks the call as a macro, like Rust's `!`, so
   a macro and a function can share a name. Arguments are substituted textually

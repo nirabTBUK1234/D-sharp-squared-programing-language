@@ -28,6 +28,12 @@ pub struct Parameter {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct TypeParameter {
+    pub name: String,
+    pub bound: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct StructField {
     pub name: String,
     pub default: Option<Expr>,
@@ -126,6 +132,7 @@ pub enum StmtKind {
     },
     Function {
         name: String,
+        type_params: Vec<TypeParameter>,
         params: Vec<Parameter>,
         body: Vec<Stmt>,
     },

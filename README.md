@@ -4,8 +4,8 @@ A small, interpreted programming language implemented in Rust. The keywords are
 Pythonic (`def`, `if`/`elif`/`else`, `x = 1`, `True`/`False`/`None`, `#`
 comments) but blocks use braces instead of indentation. It has a real lexer and
 recursive-descent parser, functions with defaults and recursion, loops,
-hashsets, hashmaps, matrices, structs with `impl` methods, traits, token macros,
-console built-ins, and a REPL.
+hashsets, hashmaps, matrices, structs with `impl` methods, traits and
+trait-bounded functions, token macros, console built-ins, and a REPL.
 
 It is still an early prototype: no modules, `match`/enums, or closures yet — see
 [Roadmap](#roadmap) and [Known limitations](#known-limitations).
@@ -217,7 +217,7 @@ print(q)            # Point(x=0, y=0)
   mutation is not written back.
 - Structs are values: `q = p` copies the fields, so `q.x = 1` does not change
   `p`. Field assignment through the original variable does.
-- There are no generics, visibility modifiers, or type annotations yet.
+- There are no generic structs, visibility modifiers, or type annotations yet.
 
 ### Traits
 
@@ -278,6 +278,37 @@ s.describe()        # square with side 3
 - Traits are interfaces plus defaults, not runtime types: there are no type
   annotations or `is` checks. A trait with no methods is a marker.
 - The trait and the struct must be defined before the `impl` runs.
+
+#### Trait-bounded functions
+
+Functions can require that their leading arguments are structs implementing a
+trait. Type parameters go in `<...>` after the function name:
+
+```text
+def show<T: Shape>(value) {
+    value.describe()
+}
+
+show(Circle(2))   # ok
+show(42)          # error: argument 'value' must implement trait 'Shape'
+```
+
+- `def name<T: Trait>(...)` declares a type parameter and its bound. The type
+  parameter is not a runtime variable; it only attaches a check to a value
+  parameter.
+- Type parameters bind to the leading value parameters by position:
+  `def f<T: Shape, U: Shape>(first, second)` checks `first` and `second`
+  against `Shape`. To constrain a later parameter, include an unbounded type
+  parameter for each earlier one, e.g. `def f<T, U: Shape>(first, second)`.
+- Type parameters without a bound (`<T>`) are accepted, but they do nothing at
+  runtime.
+- Bounds are checked at every call, after defaults have been filled in. Passing
+  a non-struct or a struct that has not implemented the trait is an error at the
+  call line.
+- The bound trait must exist when the function is called. Defining the function
+  before the trait is allowed as long as the trait exists by call time.
+- Only free functions take type parameters for now; methods keep the
+  `def method(self, ...)` form.
 
 ### Macros
 
@@ -500,8 +531,9 @@ The REPL prints the same format and keeps going.
   plus symbols), `True`/`False`/`None`, `#` comments, and collection literals
   (`hashSet(...)`, `{key: value}` hashmaps with `[ ]` indexing, `mat{...}`).
 - Done: `struct` records with defaults, `impl` methods with `self`, traits
-  (`trait`/`impl Trait for Type`, required and default methods), and statement
-  token macros (`macro name($a) { ... }`, called with `name$(...)`).
+  (`trait`/`impl Trait for Type`, required and default methods), trait-bounded
+  functions (`def name<T: Trait>(value)`), and statement token macros
+  (`macro name($a) { ... }`, called with `name$(...)`).
 - Next: `match`/enums, closures/lexical scoping, modules (`use`/`import`), then
   `try`/`except`/`raise`.
 - Built-in methods: only `console.*` (plus `print`/`input`) is implemented; the
@@ -510,8 +542,11 @@ The REPL prints the same format and keeps going.
 
 ## Known limitations
 
-- No modules, `match`/enums, generics, `try`/`except`, or lambdas. `{...}`
+- No modules, `match`/enums, `try`/`except`, or lambdas. `{...}`
   is a hashmap literal; `mat{...}` is the matrix type.
+- No generic structs or generic methods: type parameters with trait bounds are
+  only supported on free functions, and they map to leading value parameters by
+  position. They are call-time checks, not static types.
 - Traits are interfaces with defaults, not types: there are no type annotations,
   runtime `is` checks, or trait objects. Two traits cannot provide the same
   method name for one struct; there is no explicit disambiguation syntax.

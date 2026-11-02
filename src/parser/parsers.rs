@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use crate::error::Error;
 use crate::lexer::{Token, TokenKind, lex};
 use crate::parser::ast::{
-    BinaryOp, Callee, Expr, Method, Parameter, Stmt, StmtKind, StructField, TraitMethod, UnaryOp,
+    BinaryOp, Callee, Expr, Method, Parameter, Stmt, StmtKind, StructField, TraitMethod, TypeParameter,
+    UnaryOp,
 };
 
 pub struct Parser {
@@ -157,17 +158,109 @@ impl Parser {
 
     fn function_statement(&mut self, line: usize) -> Result<Stmt, Error> {
         let name = self.consume_identifier("expected a function name")?;
+        let type_params = self.type_parameters()?;
+
         self.consume(
             &TokenKind::LeftParen,
             "expected '(' after the function name",
         )?;
         let params = self.parameters()?;
+        self.check_type_parameters(&type_params, &params, line)?;
         let body = self.block()?;
 
         Ok(Stmt {
-            kind: StmtKind::Function { name, params, body },
+            kind: StmtKind::Function {
+                name,
+                type_params,
+                params,
+                body,
+            },
             line,
         })
+    }
+
+    fn type_parameters(&mut self) -> Result<Vec<TypeParameter>, Error> {
+        let mut type_params: Vec<TypeParameter> = Vec::new();
+
+        if !self.match_kind(&TokenKind::Less) {
+            return Ok(type_params);
+        }
+
+        self.skip_newlines();
+
+        if self.check(&TokenKind::Greater) {
+            return Err(Error::new(
+                self.peek().line,
+                "type parameter list cannot be empty",
+            ));
+        }
+
+        loop {
+            let param_line = self.peek().line;
+            let name = self.consume_identifier("expected a type parameter name")?;
+
+            if type_params.iter().any(|param| param.name == name) {
+                return Err(Error::new(
+                    param_line,
+                    format!("duplicate type parameter '{name}'"),
+                ));
+            }
+
+            let bound = if self.match_kind(&TokenKind::Colon) {
+                Some(self.consume_identifier("expected a trait name after ':'")?)
+            } else {
+                None
+            };
+
+            type_params.push(TypeParameter { name, bound });
+            self.skip_newlines();
+
+            if self.match_kind(&TokenKind::Comma) {
+                self.skip_newlines();
+                if self.check(&TokenKind::Greater) {
+                    break;
+                }
+                continue;
+            }
+            break;
+        }
+
+        self.consume(
+            &TokenKind::Greater,
+            "expected '>' to close the type parameter list",
+        )?;
+        Ok(type_params)
+    }
+
+    fn check_type_parameters(
+        &self,
+        type_params: &[TypeParameter],
+        params: &[Parameter],
+        line: usize,
+    ) -> Result<(), Error> {
+        if let Some(extra) = type_params.get(params.len()) {
+            return Err(Error::new(
+                line,
+                format!(
+                    "type parameter '{}' has no matching function parameter",
+                    extra.name
+                ),
+            ));
+        }
+
+        for (type_param, param) in type_params.iter().zip(params) {
+            if type_param.name == param.name {
+                return Err(Error::new(
+                    line,
+                    format!(
+                        "parameter '{}' conflicts with the type parameter of the same name",
+                        param.name
+                    ),
+                ));
+            }
+        }
+
+        Ok(())
     }
 
     fn parameters(&mut self) -> Result<Vec<Parameter>, Error> {
@@ -1380,6 +1473,52 @@ mod tests {
         };
         assert_eq!(params.len(), 2);
         assert_eq!(params[1].default, Some(Expr::None));
+    }
+
+    #[test]
+    fn parses_function_trait_bounds() {
+        let statements = Parser::parse(
+            "def show<T: Shape, U>(value, other, third = 1) {\n    return value\n}",
+        )
+        .unwrap();
+
+        let StmtKind::Function {
+            type_params,
+            params,
+            ..
+        } = &statements[0].kind
+        else {
+            panic!("expected a function");
+        };
+        assert_eq!(type_params.len(), 2);
+        assert_eq!(type_params[0].name, "T");
+        assert_eq!(type_params[0].bound.as_deref(), Some("Shape"));
+        assert_eq!(type_params[1].name, "U");
+        assert!(type_params[1].bound.is_none());
+        assert_eq!(params.len(), 3);
+    }
+
+    #[test]
+    fn function_type_parameters_are_checked() {
+        let error = Parser::parse("def f<T: Shape, U: Shape>(x) { return x }").unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("type parameter 'U' has no matching function parameter"),
+            "{error}"
+        );
+
+        let error = Parser::parse("def f<T, T>(x) { return x }").unwrap_err();
+        assert!(error.message.contains("duplicate type parameter 'T'"), "{error}");
+
+        let error = Parser::parse("def f<T>(T) { return T }").unwrap_err();
+        assert!(
+            error.message.contains("conflicts with the type parameter"),
+            "{error}"
+        );
+
+        let error = Parser::parse("def f<>(x) { return x }").unwrap_err();
+        assert!(error.message.contains("cannot be empty"), "{error}");
     }
 
     #[test]
