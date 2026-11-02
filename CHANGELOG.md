@@ -9,6 +9,11 @@
 - `impl Name { def method(self, ...) { ... } }` attaches methods. Methods mutate
   the receiver when called on a variable, Python-style, and must take `self`
   first.
+- `trait Name { def required(self); def default(self) { ... } }` declares a
+  method set, and `impl Trait for Type { ... }` implements it. Required methods
+  are checked at impl time, defaults are inherited or overridden, and dispatch
+  checks inherent methods before trait methods. A trait can be implemented once
+  per struct; two traits cannot supply the same method name.
 - `macro name($a, $b) { ... }` defines a token macro, invoked with `name$(...)`
   in statement position; the `$` marks the call as a macro, like Rust's `!`, so
   a macro and a function can share a name. Arguments are substituted textually
@@ -18,8 +23,10 @@
 
 ### Notes
 
-- No traits, generics, visibility, `match`/enums, or ownership/borrowing; the
-  last one has no meaning in a dynamically typed interpreter.
+- No generics, visibility, `match`/enums, or ownership/borrowing; the last one
+  has no meaning in a dynamically typed interpreter.
+- Traits are interfaces plus defaults, not runtime types: there are no type
+  annotations, trait objects, or `is` checks.
 - Macros work only in statement position and are called with `name$(...)`; a
   bare `name(...)` is a normal function call, so macros and functions can share
   names.

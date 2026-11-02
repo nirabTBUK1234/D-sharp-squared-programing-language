@@ -55,6 +55,7 @@ pub enum TokenKind {
     Matrix,
     Struct,
     Impl,
+    Trait,
     Macro,
 
     // literals
@@ -273,6 +274,7 @@ fn keyword(word: &str) -> TokenKind {
         "matrix" | "mat" | "matrex" => TokenKind::Matrix,
         "struct" => TokenKind::Struct,
         "impl" => TokenKind::Impl,
+        "trait" => TokenKind::Trait,
         "macro" => TokenKind::Macro,
         "and" => TokenKind::And,
         "or" => TokenKind::Or,

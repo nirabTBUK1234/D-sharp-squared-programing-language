@@ -41,6 +41,15 @@ pub struct Method {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct TraitMethod {
+    pub name: String,
+    pub params: Vec<Parameter>,
+    /// `None` means the trait only requires the method; implementations must
+    /// provide it. `Some` is a default method.
+    pub body: Option<Vec<Stmt>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Callee {
     Function(String),
     Method {
@@ -104,8 +113,13 @@ pub enum StmtKind {
         fields: Vec<StructField>,
     },
     Impl {
+        trait_name: Option<String>,
         name: String,
         methods: Vec<Method>,
+    },
+    Trait {
+        name: String,
+        methods: Vec<TraitMethod>,
     },
     Delete {
         name: String,

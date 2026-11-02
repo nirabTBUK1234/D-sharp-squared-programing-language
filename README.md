@@ -4,11 +4,11 @@ A small, interpreted programming language implemented in Rust. The keywords are
 Pythonic (`def`, `if`/`elif`/`else`, `x = 1`, `True`/`False`/`None`, `#`
 comments) but blocks use braces instead of indentation. It has a real lexer and
 recursive-descent parser, functions with defaults and recursion, loops,
-hashsets, hashmaps, matrices, structs with `impl` methods, token macros, console
-built-ins, and a REPL.
+hashsets, hashmaps, matrices, structs with `impl` methods, traits, token macros,
+console built-ins, and a REPL.
 
-It is still an early prototype: no modules, `match`/enums, traits, or closures
-yet — see [Roadmap](#roadmap) and [Known limitations](#known-limitations).
+It is still an early prototype: no modules, `match`/enums, or closures yet — see
+[Roadmap](#roadmap) and [Known limitations](#known-limitations).
 
 - **v1.1.0** — current release (2026-11-01): `hashSet(...)`, `{...}` hashmaps
   with `[ ]` indexing, text indexing, and `mat{...}`-only matrices.
@@ -88,7 +88,7 @@ FizzBuzz
 | Hashset | `hashSet(1, 2, 2)` / `set(1, 2)` | Duplicates collapse; scalars only |
 | Hashmap | `{"a": 1, "b": 2}` | Keys can be int, float, bool, or text; read/write with `[ ]` |
 | Matrix | `mat{row1: {a: 1, b: 2}}` | Named rows of named cells; `matrix`/`matrex` are aliases |
-| Struct | `Point(1, 2)` | Fixed named fields; declared with `struct`, methods with `impl` |
+| Struct | `Point(1, 2)` | Fixed named fields; declared with `struct`, methods with `impl`, behavior with traits |
 | None | `None` | Returned by functions that do not return a value |
 
 ### Variables
@@ -217,7 +217,67 @@ print(q)            # Point(x=0, y=0)
   mutation is not written back.
 - Structs are values: `q = p` copies the fields, so `q.x = 1` does not change
   `p`. Field assignment through the original variable does.
-- There are no traits, generics, visibility modifiers, or type annotations yet.
+- There are no generics, visibility modifiers, or type annotations yet.
+
+### Traits
+
+A trait is a named set of methods. A method without a body is required; a
+method with a body is a default that implementations inherit.
+
+```text
+trait Shape {
+    def area(self)
+    def describe(self) {
+        print("area:", self.area())
+    }
+}
+
+struct Circle {
+    radius
+}
+
+struct Square {
+    side
+}
+
+impl Shape for Circle {
+    def area(self) {
+        return 3 * self.radius * self.radius
+    }
+}
+
+impl Shape for Square {
+    def area(self) {
+        return self.side * self.side
+    }
+    def describe(self) {
+        print("square with side", self.side)
+    }
+}
+
+c = Circle(2)
+print(c.area())     # 12
+c.describe()        # area: 12
+
+s = Square(3)
+print(s.area())     # 9
+s.describe()        # square with side 3
+```
+
+- Declare with `trait Name { def method(self, ...) ... }`. Every trait method
+  must start with `self`. A method with no `{ ... }` body is required.
+- Implement with `impl TraitName for StructName { ... }`. All required methods
+  must be supplied in that impl, and it cannot add methods the trait does not
+  declare.
+- Defaults can be inherited as-is or overridden by the implementation.
+- Dispatch is dynamic: `value.method(...)` checks the struct's inherent `impl`
+  methods first, then its trait methods. An inherent method therefore wins over
+  a trait method with the same name.
+- A trait can be implemented only once per struct, and two different traits
+  cannot supply the same method name for one struct.
+- Traits are interfaces plus defaults, not runtime types: there are no type
+  annotations or `is` checks. A trait with no methods is a marker.
+- The trait and the struct must be defined before the `impl` runs.
 
 ### Macros
 
@@ -439,8 +499,9 @@ The REPL prints the same format and keeps going.
   functions (`def`/`return`, defaults, recursion), operators (`and`/`or`/`not`
   plus symbols), `True`/`False`/`None`, `#` comments, and collection literals
   (`hashSet(...)`, `{key: value}` hashmaps with `[ ]` indexing, `mat{...}`).
-- Done: `struct` records with defaults, `impl` methods with `self`, and
-  statement token macros (`macro name($a) { ... }`, called with `name$(...)`).
+- Done: `struct` records with defaults, `impl` methods with `self`, traits
+  (`trait`/`impl Trait for Type`, required and default methods), and statement
+  token macros (`macro name($a) { ... }`, called with `name$(...)`).
 - Next: `match`/enums, closures/lexical scoping, modules (`use`/`import`), then
   `try`/`except`/`raise`.
 - Built-in methods: only `console.*` (plus `print`/`input`) is implemented; the
@@ -449,8 +510,11 @@ The REPL prints the same format and keeps going.
 
 ## Known limitations
 
-- No modules, `match`/enums, traits/generics, `try`/`except`, or lambdas. `{...}`
+- No modules, `match`/enums, generics, `try`/`except`, or lambdas. `{...}`
   is a hashmap literal; `mat{...}` is the matrix type.
+- Traits are interfaces with defaults, not types: there are no type annotations,
+  runtime `is` checks, or trait objects. Two traits cannot provide the same
+  method name for one struct; there is no explicit disambiguation syntax.
 - No ownership, borrowing, or static types: this is a dynamic interpreter, so
   Rust's borrow checker has no counterpart here.
 - Functions are dynamically scoped: a called function sees the *caller's*

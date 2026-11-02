@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::error::Error;
-use crate::parser::ast::{BinaryOp, Callee, Expr, Parameter, Stmt, StmtKind, UnaryOp};
+use crate::parser::ast::{BinaryOp, Callee, Expr, Method, Parameter, Stmt, StmtKind, UnaryOp};
 use crate::parser::parsers::Parser;
 use crate::value::{SetItem, StructValue, Value};
 
@@ -41,6 +41,7 @@ pub struct Env {
     scopes: Vec<HashMap<String, Value>>,
     functions: Vec<HashMap<String, Rc<Function>>>,
     structs: Vec<HashMap<String, StructDef>>,
+    traits: Vec<HashMap<String, TraitDef>>,
 }
 
 struct Function {
@@ -51,7 +52,13 @@ struct Function {
 #[derive(Clone)]
 struct StructDef {
     fields: Vec<FieldDef>,
+    /// Methods from `impl Type { ... }`. These win over trait methods.
     methods: HashMap<String, Rc<Function>>,
+    /// Methods supplied by traits, including defaults.
+    trait_methods: HashMap<String, Rc<Function>>,
+    /// Which trait supplied each trait method, for conflict messages.
+    trait_sources: HashMap<String, String>,
+    traits: HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -60,12 +67,33 @@ struct FieldDef {
     default: Option<Expr>,
 }
 
+#[derive(Clone)]
+struct TraitDef {
+    methods: HashMap<String, TraitMethodDef>,
+}
+
+#[derive(Clone)]
+struct TraitMethodDef {
+    params: Vec<Parameter>,
+    body: Option<Vec<Stmt>>,
+}
+
+impl StructDef {
+    fn method(&self, name: &str) -> Option<Rc<Function>> {
+        self.methods
+            .get(name)
+            .or_else(|| self.trait_methods.get(name))
+            .cloned()
+    }
+}
+
 impl Env {
     pub fn new() -> Self {
         Env {
             scopes: vec![HashMap::new()],
             functions: vec![HashMap::new()],
             structs: vec![HashMap::new()],
+            traits: vec![HashMap::new()],
         }
     }
 
@@ -73,12 +101,14 @@ impl Env {
         self.scopes.push(HashMap::new());
         self.functions.push(HashMap::new());
         self.structs.push(HashMap::new());
+        self.traits.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.functions.pop();
         self.structs.pop();
+        self.traits.pop();
     }
 
     pub fn define_function(&mut self, name: String, params: Vec<Parameter>, body: Vec<Stmt>) {
@@ -119,6 +149,42 @@ impl Env {
         for scope in self.structs.iter_mut().rev() {
             if let Some(definition) = scope.get_mut(struct_name) {
                 definition.methods.insert(method_name, function);
+                return Ok(());
+            }
+        }
+
+        Err(format!("unknown struct '{struct_name}'"))
+    }
+
+    fn define_trait(&mut self, name: String, definition: TraitDef) {
+        self.traits
+            .last_mut()
+            .expect("there is always a scope")
+            .insert(name, definition);
+    }
+
+    fn get_trait(&self, name: &str) -> Option<TraitDef> {
+        self.traits
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).cloned())
+    }
+
+    fn add_trait_methods(
+        &mut self,
+        struct_name: &str,
+        trait_name: &str,
+        methods: Vec<(String, Rc<Function>)>,
+    ) -> Result<(), String> {
+        for scope in self.structs.iter_mut().rev() {
+            if let Some(definition) = scope.get_mut(struct_name) {
+                for (method_name, function) in methods {
+                    definition.trait_methods.insert(method_name.clone(), function);
+                    definition
+                        .trait_sources
+                        .insert(method_name, trait_name.to_string());
+                }
+                definition.traits.insert(trait_name.to_string());
                 return Ok(());
             }
         }
@@ -287,20 +353,53 @@ impl<'a> Interpreter<'a> {
                         })
                         .collect(),
                     methods: HashMap::new(),
+                    trait_methods: HashMap::new(),
+                    trait_sources: HashMap::new(),
+                    traits: HashSet::new(),
                 };
                 self.env.define_struct(name.clone(), definition);
                 Ok(Flow::Normal)
             }
-            StmtKind::Impl { name, methods } => {
+            StmtKind::Trait { name, methods } => {
+                let mut definition = TraitDef {
+                    methods: HashMap::new(),
+                };
+
                 for method in methods {
-                    let function = Rc::new(Function {
-                        params: method.params.clone(),
-                        body: method.body.clone(),
-                    });
-                    self.env
-                        .add_method(name, method.name.clone(), function)
-                        .map_err(|message| Error::new(line, message))?;
+                    definition.methods.insert(
+                        method.name.clone(),
+                        TraitMethodDef {
+                            params: method.params.clone(),
+                            body: method.body.clone(),
+                        },
+                    );
                 }
+
+                self.env.define_trait(name.clone(), definition);
+                Ok(Flow::Normal)
+            }
+            StmtKind::Impl {
+                trait_name,
+                name,
+                methods,
+            } => {
+                match trait_name {
+                    None => {
+                        for method in methods {
+                            let function = Rc::new(Function {
+                                params: method.params.clone(),
+                                body: method.body.clone(),
+                            });
+                            self.env
+                                .add_method(name, method.name.clone(), function)
+                                .map_err(|message| Error::new(line, message))?;
+                        }
+                    }
+                    Some(trait_name) => {
+                        self.implement_trait(trait_name, name, methods, line)?;
+                    }
+                }
+
                 Ok(Flow::Normal)
             }
             StmtKind::Delete { name } => {
@@ -631,7 +730,7 @@ impl<'a> Interpreter<'a> {
                 )
             })?;
 
-        let function = definition.methods.get(method).cloned().ok_or_else(|| {
+        let function = definition.method(method).ok_or_else(|| {
             Error::new(
                 line,
                 format!(
@@ -653,6 +752,108 @@ impl<'a> Interpreter<'a> {
         }
 
         Ok(result)
+    }
+
+    fn implement_trait(
+        &mut self,
+        trait_name: &str,
+        struct_name: &str,
+        methods: &[Method],
+        line: usize,
+    ) -> Result<(), Error> {
+        let trait_definition = self.env.get_trait(trait_name).ok_or_else(|| {
+            Error::new(line, format!("unknown trait '{trait_name}'"))
+        })?;
+        let struct_definition = self.env.get_struct(struct_name).ok_or_else(|| {
+            Error::new(line, format!("unknown struct '{struct_name}'"))
+        })?;
+
+        if struct_definition.traits.contains(trait_name) {
+            return Err(Error::new(
+                line,
+                format!("struct '{struct_name}' already implements trait '{trait_name}'"),
+            ));
+        }
+
+        let mut provided: HashMap<String, Rc<Function>> = HashMap::new();
+
+        for method in methods {
+            let Some(trait_method) = trait_definition.methods.get(&method.name) else {
+                return Err(Error::new(
+                    line,
+                    format!("trait '{trait_name}' has no method '{}'", method.name),
+                ));
+            };
+
+            if trait_method.params.len() != method.params.len() {
+                return Err(Error::new(
+                    line,
+                    format!(
+                        "method '{}' for trait '{trait_name}' takes {} parameter(s), but {} given",
+                        method.name,
+                        trait_method.params.len(),
+                        method.params.len()
+                    ),
+                ));
+            }
+
+            provided.insert(
+                method.name.clone(),
+                Rc::new(Function {
+                    params: method.params.clone(),
+                    body: method.body.clone(),
+                }),
+            );
+        }
+
+        let mut final_methods = Vec::new();
+        let mut missing = Vec::new();
+
+        for (method_name, trait_method) in &trait_definition.methods {
+            if let Some(function) = provided.get(method_name) {
+                final_methods.push((method_name.clone(), function.clone()));
+            } else if let Some(body) = &trait_method.body {
+                final_methods.push((
+                    method_name.clone(),
+                    Rc::new(Function {
+                        params: trait_method.params.clone(),
+                        body: body.clone(),
+                    }),
+                ));
+            } else {
+                missing.push(method_name.clone());
+            }
+        }
+
+        if !missing.is_empty() {
+            missing.sort();
+            return Err(Error::new(
+                line,
+                format!(
+                    "struct '{struct_name}' is missing required method(s) for trait '{trait_name}': {}",
+                    missing.join(", ")
+                ),
+            ));
+        }
+
+        for (method_name, _) in &final_methods {
+            if let Some(source) = struct_definition.trait_sources.get(method_name)
+                && source != trait_name
+            {
+                return Err(Error::new(
+                    line,
+                    format!(
+                        "method '{method_name}' on struct '{struct_name}' already comes from trait '{source}', so it cannot also come from '{trait_name}'"
+                    ),
+                ));
+            }
+        }
+
+        self.env
+            .add_trait_methods(struct_name, trait_name, final_methods)
+            .map_err(|message| Error::new(line, message))?;
+
+        Ok(())
     }
 
     fn construct_struct(
@@ -1789,6 +1990,152 @@ mod tests {
 
         let error = error_of("impl Missing { def m(self) { } }");
         assert!(error.message.contains("unknown struct 'Missing'"), "{error}");
+    }
+
+    #[test]
+    fn traits_supply_default_methods_and_dispatch() {
+        let env = env_after(
+            "trait Sized {\n\
+             def size(self)\n\
+             def double_size(self) {\n\
+             return self.size() * 2\n\
+             }\n\
+             }\n\
+             struct Box { width }\n\
+             impl Sized for Box {\n\
+             def size(self) {\n\
+             return self.width\n\
+             }\n\
+             }\n\
+             box = Box(4)\n\
+             doubled = box.double_size()",
+        );
+
+        assert_eq!(env.get_value("doubled").unwrap(), Value::Int(8));
+    }
+
+    #[test]
+    fn trait_methods_can_be_overridden_and_inherent_methods_win() {
+        let env = env_after(
+            "trait Label {\n\
+             def label(self) {\n\
+             return \"trait\"\n\
+             }\n\
+             }\n\
+             struct Defaulted { x = 1 }\n\
+             impl Label for Defaulted { }\n\
+             d = Defaulted()\n\
+             default_label = d.label()\n\
+             struct Overridden { x = 1 }\n\
+             impl Label for Overridden {\n\
+             def label(self) {\n\
+             return \"impl\"\n\
+             }\n\
+             }\n\
+             o = Overridden()\n\
+             impl_label = o.label()\n\
+             struct Inherent { x = 1 }\n\
+             impl Label for Inherent { }\n\
+             impl Inherent {\n\
+             def label(self) {\n\
+             return \"inherent\"\n\
+             }\n\
+             }\n\
+             i = Inherent()\n\
+             inherent_label = i.label()",
+        );
+
+        assert_eq!(
+            env.get_value("default_label").unwrap(),
+            Value::Text("trait".into())
+        );
+        assert_eq!(
+            env.get_value("impl_label").unwrap(),
+            Value::Text("impl".into())
+        );
+        assert_eq!(
+            env.get_value("inherent_label").unwrap(),
+            Value::Text("inherent".into())
+        );
+    }
+
+    #[test]
+    fn trait_errors_report_the_line() {
+        let error = error_of(
+            "trait T { def m(self) }\n\
+             struct S { x = 1 }\n\
+             impl T for S { }",
+        );
+        assert!(
+            error
+                .message
+                .contains("missing required method(s) for trait 'T': m"),
+            "{error}"
+        );
+        assert_eq!(error.line, 3);
+
+        let error = error_of(
+            "trait T { def m(self) }\n\
+             struct S { x = 1 }\n\
+             impl T for S { def n(self) { return 1 } }",
+        );
+        assert!(
+            error.message.contains("trait 'T' has no method 'n'"),
+            "{error}"
+        );
+        assert_eq!(error.line, 3);
+
+        let error = error_of(
+            "trait T { def m(self, a) }\n\
+             struct S { x = 1 }\n\
+             impl T for S { def m(self) { return 1 } }",
+        );
+        assert!(
+            error
+                .message
+                .contains("takes 2 parameter(s), but 1 given"),
+            "{error}"
+        );
+        assert_eq!(error.line, 3);
+
+        let error = error_of("struct S { x = 1 }\nimpl Missing for S { }");
+        assert!(error.message.contains("unknown trait 'Missing'"), "{error}");
+        assert_eq!(error.line, 2);
+    }
+
+    #[test]
+    fn a_trait_can_only_be_implemented_once_per_struct() {
+        let error = error_of(
+            "trait T { def m(self) }\n\
+             struct S { x = 1 }\n\
+             impl T for S { def m(self) { return 1 } }\n\
+             impl T for S { def m(self) { return 2 } }",
+        );
+        assert!(
+            error
+                .message
+                .contains("struct 'S' already implements trait 'T'"),
+            "{error}"
+        );
+        assert_eq!(error.line, 4);
+    }
+
+    #[test]
+    fn two_traits_cannot_provide_the_same_method() {
+        let error = error_of(
+            "trait A { def m(self) }\n\
+             trait B { def m(self) }\n\
+             struct S { x = 1 }\n\
+             impl A for S { def m(self) { return 1 } }\n\
+             impl B for S { def m(self) { return 2 } }",
+        );
+        assert!(
+            error
+                .message
+                .contains("already comes from trait 'A'"),
+            "{error}"
+        );
+        assert_eq!(error.line, 5);
     }
 
     #[test]

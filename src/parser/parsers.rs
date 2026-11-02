@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::error::Error;
 use crate::lexer::{Token, TokenKind, lex};
 use crate::parser::ast::{
-    BinaryOp, Callee, Expr, Method, Parameter, Stmt, StmtKind, StructField, UnaryOp,
+    BinaryOp, Callee, Expr, Method, Parameter, Stmt, StmtKind, StructField, TraitMethod, UnaryOp,
 };
 
 pub struct Parser {
@@ -67,6 +67,10 @@ impl Parser {
             TokenKind::Impl => {
                 self.advance();
                 self.impl_statement(line)
+            }
+            TokenKind::Trait => {
+                self.advance();
+                self.trait_statement(line)
             }
             TokenKind::Macro => {
                 self.advance();
@@ -267,7 +271,15 @@ impl Parser {
     }
 
     fn impl_statement(&mut self, line: usize) -> Result<Stmt, Error> {
-        let name = self.consume_identifier("expected a struct name after 'impl'")?;
+        let first = self.consume_identifier("expected a struct or trait name after 'impl'")?;
+
+        let (trait_name, name) = if self.match_kind(&TokenKind::For) {
+            let struct_name = self.consume_identifier("expected a struct name after 'for'")?;
+            (Some(first), struct_name)
+        } else {
+            (None, first)
+        };
+
         self.consume(&TokenKind::LeftBrace, "expected '{' after the impl name")?;
         self.skip_separators();
 
@@ -276,6 +288,14 @@ impl Parser {
             let method_line = self.peek().line;
             self.consume(&TokenKind::Def, "expected 'def' for a method")?;
             let method_name = self.consume_identifier("expected a method name")?;
+
+            if methods.iter().any(|method| method.name == method_name) {
+                return Err(Error::new(
+                    method_line,
+                    format!("duplicate method '{method_name}' in impl for '{name}'"),
+                ));
+            }
+
             self.consume(
                 &TokenKind::LeftParen,
                 "expected '(' after the method name",
@@ -300,7 +320,72 @@ impl Parser {
 
         self.consume(&TokenKind::RightBrace, "expected '}' to close the impl")?;
         Ok(Stmt {
-            kind: StmtKind::Impl { name, methods },
+            kind: StmtKind::Impl {
+                trait_name,
+                name,
+                methods,
+            },
+            line,
+        })
+    }
+
+    fn trait_statement(&mut self, line: usize) -> Result<Stmt, Error> {
+        let name = self.consume_identifier("expected a trait name after 'trait'")?;
+        self.consume(&TokenKind::LeftBrace, "expected '{' after the trait name")?;
+        self.skip_separators();
+
+        let mut methods: Vec<TraitMethod> = Vec::new();
+        while !self.check(&TokenKind::RightBrace) && !self.check(&TokenKind::Eof) {
+            let method_line = self.peek().line;
+            self.consume(&TokenKind::Def, "expected 'def' for a trait method")?;
+            let method_name = self.consume_identifier("expected a method name")?;
+
+            if methods.iter().any(|method| method.name == method_name) {
+                return Err(Error::new(
+                    method_line,
+                    format!("trait '{name}' has duplicate method '{method_name}'"),
+                ));
+            }
+
+            self.consume(
+                &TokenKind::LeftParen,
+                "expected '(' after the method name",
+            )?;
+            let params = self.parameters()?;
+
+            if params.first().map(|param| param.name.as_str()) != Some("self") {
+                return Err(Error::new(
+                    method_line,
+                    format!("trait method '{name}.{method_name}' must start with 'self'"),
+                ));
+            }
+
+            // A `{` (on this line or the next) is a default body; otherwise the
+            // method is required and the implementation must provide it.
+            let has_body = self.check(&TokenKind::LeftBrace)
+                || self.next_non_newline_is(&TokenKind::LeftBrace);
+            let body = if has_body {
+                self.skip_newlines();
+                Some(self.block()?)
+            } else {
+                None
+            };
+
+            if body.is_none() {
+                self.end_statement()?;
+            }
+
+            methods.push(TraitMethod {
+                name: method_name,
+                params,
+                body,
+            });
+            self.skip_separators();
+        }
+
+        self.consume(&TokenKind::RightBrace, "expected '}' to close the trait")?;
+        Ok(Stmt {
+            kind: StmtKind::Trait { name, methods },
             line,
         })
     }
@@ -1065,6 +1150,14 @@ impl Parser {
             .is_some_and(|token| std::mem::discriminant(&token.kind) == std::mem::discriminant(kind))
     }
 
+    fn next_non_newline_is(&self, kind: &TokenKind) -> bool {
+        self.tokens
+            .iter()
+            .skip(self.current)
+            .find(|token| !matches!(token.kind, TokenKind::Newline))
+            .is_some_and(|token| std::mem::discriminant(&token.kind) == std::mem::discriminant(kind))
+    }
+
     fn consume(&mut self, kind: &TokenKind, message: &str) -> Result<Token, Error> {
         if self.check(kind) {
             return Ok(self.advance().clone());
@@ -1305,9 +1398,15 @@ mod tests {
         assert_eq!(fields[0].name, "x");
         assert_eq!(fields[0].default, Some(Expr::Int(0)));
 
-        let StmtKind::Impl { name, methods } = &statements[1].kind else {
+        let StmtKind::Impl {
+            trait_name,
+            name,
+            methods,
+        } = &statements[1].kind
+        else {
             panic!("expected an impl");
         };
+        assert!(trait_name.is_none());
         assert_eq!(name, "Point");
         assert_eq!(methods.len(), 1);
         assert_eq!(methods[0].name, "sum");
@@ -1324,6 +1423,75 @@ mod tests {
         let error = Parser::parse("struct P { x }\nimpl P { def m(a) { return a } }")
             .unwrap_err();
         assert!(error.message.contains("must start with 'self'"), "{error}");
+    }
+
+    #[test]
+    fn traits_have_required_and_default_methods() {
+        let statements = Parser::parse(
+            "trait Shape {\n\
+             def area(self)\n\
+             def describe(self) {\n\
+             return self.area()\n\
+             }\n\
+             }\n\
+             struct Circle { radius }\n\
+             impl Shape for Circle {\n\
+             def area(self) {\n\
+             return self.radius\n\
+             }\n\
+             }",
+        )
+        .unwrap();
+
+        let StmtKind::Trait { name, methods } = &statements[0].kind else {
+            panic!("expected a trait");
+        };
+        assert_eq!(name, "Shape");
+        assert_eq!(methods.len(), 2);
+        assert_eq!(methods[0].name, "area");
+        assert_eq!(methods[0].params[0].name, "self");
+        assert!(methods[0].body.is_none());
+        assert_eq!(methods[1].name, "describe");
+        assert!(methods[1].body.is_some());
+
+        let StmtKind::Impl {
+            trait_name,
+            name,
+            methods,
+        } = &statements[2].kind
+        else {
+            panic!("expected a trait impl");
+        };
+        assert_eq!(trait_name.as_deref(), Some("Shape"));
+        assert_eq!(name, "Circle");
+        assert_eq!(methods[0].name, "area");
+    }
+
+    #[test]
+    fn trait_methods_must_take_self() {
+        let error = Parser::parse("trait T { def m(a) }").unwrap_err();
+        assert!(error.message.contains("must start with 'self'"), "{error}");
+    }
+
+    #[test]
+    fn duplicate_trait_methods_are_errors() {
+        let error = Parser::parse("trait T {\n    def m(self)\n    def m(self)\n}").unwrap_err();
+        assert!(
+            error.message.contains("duplicate method 'm'"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn duplicate_impl_methods_are_errors() {
+        let error = Parser::parse(
+            "struct S { x }\nimpl S {\n    def m(self) { }\n    def m(self) { }\n}",
+        )
+        .unwrap_err();
+        assert!(
+            error.message.contains("duplicate method 'm' in impl for 'S'"),
+            "{error}"
+        );
     }
 
     #[test]
