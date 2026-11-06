@@ -1,5 +1,4 @@
 use std::{
-    cell::RefCell,
     collections::{HashMap, HashSet},
     error::Error as StdError,
     fs,
@@ -13,7 +12,7 @@ use crate::parser::ast::{
     BinaryOp, Callee, Expr, Method, Parameter, Stmt, StmtKind, TypeParameter, UnaryOp,
 };
 use crate::parser::parsers::Parser;
-use crate::value::{SetItem, StructValue, Value};
+use crate::value::{ListValue, SetItem, StructValue, TypeSpec, Value, repr_value};
 
 const CONSOLE_METHODS: &str = "console.debug, console.print, console.println, console.input, console.clear, console.warn, console.error";
 
@@ -280,39 +279,52 @@ impl Env {
         value: Value,
         line: usize,
     ) -> Result<(), String> {
-        for scope in self.scopes.iter_mut().rev() {
-            if let Some(existing) = scope.get_mut(name) {
-                return match existing {
-                    Value::Map(entries) => {
-                        let key = map_key(index, line).map_err(|error| error.message)?;
-                        entries.insert(key, value);
-                        Ok(())
-                    }
-                    Value::List(items) => {
-                        let index_type = index.type_name().to_string();
-                        let Value::Int(position) = index else {
-                            return Err(format!(
-                                "list index must be an int, got {index_type}"
-                            ));
-                        };
+        let scope_index = self
+            .scopes
+            .iter()
+            .rposition(|scope| scope.contains_key(name))
+            .ok_or_else(|| format!("unknown variable '{name}'"))?;
 
-                        let len = items.borrow().len();
-                        let resolved = resolve_index(position, len).ok_or_else(|| {
-                            format!("list index {position} is out of range (length {len})")
-                        })?;
-                        items.borrow_mut()[resolved] = value;
-                        Ok(())
-                    }
-                    other => Err(format!(
-                        "cannot assign to a lookup on '{}': it is a {}, not a hashmap or list",
-                        name,
-                        other.type_name()
-                    )),
-                };
+        let list = match self.scopes[scope_index].get(name) {
+            Some(Value::List(list)) => Some(list.clone()),
+            Some(Value::Map(_)) => None,
+            Some(other) => {
+                return Err(format!(
+                    "cannot assign to a lookup on '{}': it is a {}, not a hashmap or list",
+                    name,
+                    other.type_name()
+                ));
             }
+            None => unreachable!("the scope was found by contains_key"),
+        };
+
+        if let Some(list) = list {
+            let index_type = index.type_name().to_string();
+            let Value::Int(position) = index else {
+                return Err(format!(
+                    "list index must be an int, got {index_type}"
+                ));
+            };
+
+            let len = list.items.borrow().len();
+            let resolved = resolve_index(position, len).ok_or_else(|| {
+                format!("list index {position} is out of range (length {len})")
+            })?;
+
+            if let Some(element_type) = list.element_type() {
+                self.ensure_value_matches_spec(&value, &element_type, line)?;
+            }
+
+            list.items.borrow_mut()[resolved] = value;
+            return Ok(());
         }
 
-        Err(format!("unknown variable '{name}'"))
+        let Some(Value::Map(entries)) = self.scopes[scope_index].get_mut(name) else {
+            unreachable!("the entry was checked as a hashmap");
+        };
+        let key = map_key(index, line).map_err(|error| error.message)?;
+        entries.insert(key, value);
+        Ok(())
     }
 
     pub fn assign_slice(
@@ -324,46 +336,56 @@ impl Env {
         step: Option<Value>,
         line: usize,
     ) -> Result<(), String> {
-        for scope in self.scopes.iter_mut().rev() {
-            if let Some(existing) = scope.get_mut(name) {
-                let existing_type = existing.type_name().to_string();
-                let Value::List(items) = existing else {
-                    return Err(format!(
-                        "cannot slice-assign to '{}': it is a {}, not a list",
-                        name, existing_type
-                    ));
-                };
+        let scope_index = self
+            .scopes
+            .iter()
+            .rposition(|scope| scope.contains_key(name))
+            .ok_or_else(|| format!("unknown variable '{name}'"))?;
 
-                let new_items = iterate(&value, line).map_err(|error| error.message)?;
-                let len = items.borrow().len();
-                let (start, stop, step) =
-                    normalize_slice(len, start, stop, step, line).map_err(|error| error.message)?;
-                let mut items = items.borrow_mut();
+        let list = match self.scopes[scope_index].get(name) {
+            Some(Value::List(list)) => list.clone(),
+            Some(other) => {
+                return Err(format!(
+                    "cannot slice-assign to '{}': it is a {}, not a list",
+                    name,
+                    other.type_name()
+                ));
+            }
+            None => unreachable!("the scope was found by contains_key"),
+        };
 
-                if step == 1 {
-                    let start = start as usize;
-                    let stop = stop as usize;
-                    items.splice(start..stop, new_items);
-                } else {
-                    let indices = indices_from_parts(start, stop, step);
-                    if indices.len() != new_items.len() {
-                        return Err(format!(
-                            "attempt to assign sequence of size {} to extended slice of size {}",
-                            new_items.len(),
-                            indices.len()
-                        ));
-                    }
-
-                    for (index, item) in indices.into_iter().zip(new_items) {
-                        items[index] = item;
-                    }
-                }
-
-                return Ok(());
+        let new_items = iterate(&value, line).map_err(|error| error.message)?;
+        if let Some(element_type) = list.element_type() {
+            for item in &new_items {
+                self.ensure_value_matches_spec(item, &element_type, line)?;
             }
         }
 
-        Err(format!("unknown variable '{name}'"))
+        let len = list.items.borrow().len();
+        let (start, stop, step) =
+            normalize_slice(len, start, stop, step, line).map_err(|error| error.message)?;
+        let mut items = list.items.borrow_mut();
+
+        if step == 1 {
+            let start = start as usize;
+            let stop = stop as usize;
+            items.splice(start..stop, new_items);
+        } else {
+            let indices = indices_from_parts(start, stop, step);
+            if indices.len() != new_items.len() {
+                return Err(format!(
+                    "attempt to assign sequence of size {} to extended slice of size {}",
+                    new_items.len(),
+                    indices.len()
+                ));
+            }
+
+            for (index, item) in indices.into_iter().zip(new_items) {
+                items[index] = item;
+            }
+        }
+
+        Ok(())
     }
 
     pub fn delete_index(&mut self, name: &str, index: Value, line: usize) -> Result<(), String> {
@@ -378,7 +400,7 @@ impl Env {
                             Err(format!("hashmap key {key} not found"))
                         }
                     }
-                    Value::List(items) => {
+                    Value::List(list) => {
                         let index_type = index.type_name().to_string();
                         let Value::Int(position) = index else {
                             return Err(format!(
@@ -386,11 +408,11 @@ impl Env {
                             ));
                         };
 
-                        let len = items.borrow().len();
+                        let len = list.items.borrow().len();
                         let resolved = resolve_index(position, len).ok_or_else(|| {
                             format!("list index {position} is out of range (length {len})")
                         })?;
-                        items.borrow_mut().remove(resolved);
+                        list.items.borrow_mut().remove(resolved);
                         Ok(())
                     }
                     other => Err(format!(
@@ -416,17 +438,17 @@ impl Env {
         for scope in self.scopes.iter_mut().rev() {
             if let Some(existing) = scope.get_mut(name) {
                 let existing_type = existing.type_name().to_string();
-                let Value::List(items) = existing else {
+                let Value::List(list) = existing else {
                     return Err(format!(
                         "cannot slice-delete from '{}': it is a {}, not a list",
                         name, existing_type
                     ));
                 };
 
-                let len = items.borrow().len();
+                let len = list.items.borrow().len();
                 let (start, stop, step) =
                     normalize_slice(len, start, stop, step, line).map_err(|error| error.message)?;
-                let mut items = items.borrow_mut();
+                let mut items = list.items.borrow_mut();
 
                 if step == 1 {
                     items.drain(start as usize..stop as usize);
@@ -471,6 +493,295 @@ impl Env {
 
         Err(format!("unknown variable '{name}'"))
     }
+    /// Checks that a type specification names only known structs/traits and
+    /// recursively validates generic arguments.
+    fn validate_type_spec(&self, spec: &TypeSpec) -> Result<(), String> {
+        match spec {
+            TypeSpec::List(Some(inner)) => self.validate_type_spec(inner),
+            TypeSpec::Named(name) => {
+                if self.get_trait(name).is_some() || self.get_struct(name).is_some() {
+                    Ok(())
+                } else {
+                    Err(format!("unknown type annotation '{name}'"))
+                }
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Checks a value against a type spec. Untyped lists that match are promoted
+    /// to the expected element type, so later mutation is checked too.
+    fn ensure_value_matches_spec(
+        &self,
+        value: &Value,
+        spec: &TypeSpec,
+        line: usize,
+    ) -> Result<(), String> {
+        match spec {
+            TypeSpec::Any => Ok(()),
+            TypeSpec::Int => ensure_simple(value, spec, line, matches!(value, Value::Int(_))),
+            TypeSpec::Float => ensure_simple(value, spec, line, matches!(value, Value::Float(_))),
+            TypeSpec::Number => ensure_simple(
+                value,
+                spec,
+                line,
+                matches!(value, Value::Int(_) | Value::Float(_)),
+            ),
+            TypeSpec::Bool => ensure_simple(value, spec, line, matches!(value, Value::Bool(_))),
+            TypeSpec::Text => ensure_simple(value, spec, line, matches!(value, Value::Text(_))),
+            TypeSpec::None => ensure_simple(value, spec, line, matches!(value, Value::None)),
+            TypeSpec::HashSet => {
+                ensure_simple(value, spec, line, matches!(value, Value::HashSet(_)))
+            }
+            TypeSpec::HashMap => ensure_simple(value, spec, line, matches!(value, Value::Map(_))),
+            TypeSpec::Matrix => ensure_simple(value, spec, line, matches!(value, Value::Matrix(_))),
+            TypeSpec::List(None) => {
+                ensure_simple(value, spec, line, matches!(value, Value::List(_)))
+            }
+            TypeSpec::List(Some(inner)) => {
+                let Value::List(list) = value else {
+                    return Err(format!("expected {spec}, got {}", value.type_name()));
+                };
+
+                self.validate_type_spec(inner)?;
+
+                if let Some(existing) = list.element_type() {
+                    self.ensure_spec_compatible(&existing, inner, line)?;
+                } else {
+                    let items = list.items.borrow();
+                    for (index, item) in items.iter().enumerate() {
+                        self.ensure_value_matches_spec(item, inner, line)
+                            .map_err(|message| format!("list element at index {index}: {message}"))?;
+                    }
+                    drop(items);
+                    if !matches!(**inner, TypeSpec::Any) {
+                        list.promote((**inner).clone());
+                    }
+                }
+
+                Ok(())
+            }
+            TypeSpec::Named(name) => {
+                if self.get_trait(name).is_some() {
+                    match value {
+                        Value::Struct(struct_value) => {
+                            let implements = self
+                                .get_struct(&struct_value.type_name)
+                                .is_some_and(|definition| definition.traits.contains(name));
+                            if implements {
+                                Ok(())
+                            } else {
+                                Err(format!(
+                                    "expected a value implementing trait '{name}', got struct '{}'",
+                                    struct_value.type_name
+                                ))
+                            }
+                        }
+                        other => Err(format!(
+                            "expected a value implementing trait '{name}', got {}",
+                            other.type_name()
+                        )),
+                    }
+                } else if self.get_struct(name).is_some() {
+                    match value {
+                        Value::Struct(struct_value) if struct_value.type_name == *name => Ok(()),
+                        other => Err(format!("expected {name}, got {}", other.type_name())),
+                    }
+                } else {
+                    Err(format!("unknown type annotation '{name}'"))
+                }
+            }
+        }
+    }
+
+    /// Checks that an existing element type for a typed list can satisfy the
+    /// expected element type.
+    fn ensure_spec_compatible(
+        &self,
+        existing: &TypeSpec,
+        expected: &TypeSpec,
+        _line: usize,
+    ) -> Result<(), String> {
+        if existing == expected {
+            return Ok(());
+        }
+
+        match expected {
+            TypeSpec::Any => Ok(()),
+            TypeSpec::Number => {
+                if matches!(
+                    existing,
+                    TypeSpec::Int | TypeSpec::Float | TypeSpec::Number
+                ) {
+                    Ok(())
+                } else {
+                    Err(format!("list is typed {existing}, expected {expected}"))
+                }
+            }
+            TypeSpec::List(None) => {
+                if matches!(existing, TypeSpec::List(_)) {
+                    Ok(())
+                } else {
+                    Err(format!("list is typed {existing}, expected {expected}"))
+                }
+            }
+            TypeSpec::List(Some(expected_inner)) => match existing {
+                TypeSpec::List(Some(existing_inner)) => {
+                    self.ensure_spec_compatible(existing_inner, expected_inner, _line)
+                }
+                _ => Err(format!("list is typed {existing}, expected {expected}")),
+            },
+            TypeSpec::Named(trait_name) if self.get_trait(trait_name).is_some() => {
+                match existing {
+                    TypeSpec::Named(struct_name) => {
+                        let implements = self
+                            .get_struct(struct_name)
+                            .is_some_and(|definition| definition.traits.contains(trait_name));
+                        if implements {
+                            Ok(())
+                        } else {
+                            Err(format!("list is typed {existing}, expected {expected}"))
+                        }
+                    }
+                    _ => Err(format!("list is typed {existing}, expected {expected}")),
+                }
+            }
+            _ => {
+                if existing == expected {
+                    Ok(())
+                } else {
+                    Err(format!("list is typed {existing}, expected {expected}"))
+                }
+            }
+        }
+    }
+}
+
+fn ensure_simple(
+    value: &Value,
+    spec: &TypeSpec,
+    _line: usize,
+    accepted: bool,
+) -> Result<(), String> {
+    if accepted {
+        Ok(())
+    } else {
+        Err(format!("expected {spec}, got {}", value.type_name()))
+    }
+}
+
+fn parse_type_spec(text: &str) -> Result<TypeSpec, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("empty type annotation".to_string());
+    }
+
+    if let Some(open) = text.find('[') {
+        if !text.ends_with(']') {
+            return Err(format!("invalid type annotation '{text}'"));
+        }
+
+        let name = text[..open].trim();
+        if !name.eq_ignore_ascii_case("list") {
+            return Err(format!(
+                "only List[...] type arguments are supported, got '{text}'"
+            ));
+        }
+
+        let arguments = split_type_arguments(&text[open + 1..text.len() - 1])?;
+        if arguments.len() != 1 {
+            return Err(format!(
+                "List[...] needs exactly one type argument, got {}",
+                arguments.len()
+            ));
+        }
+
+        let inner = parse_type_spec(arguments[0])?;
+        return Ok(TypeSpec::List(Some(Box::new(inner))));
+    }
+
+    Ok(match text.to_ascii_lowercase().as_str() {
+        "any" => TypeSpec::Any,
+        "int" => TypeSpec::Int,
+        "float" => TypeSpec::Float,
+        "number" => TypeSpec::Number,
+        "bool" => TypeSpec::Bool,
+        "text" | "string" => TypeSpec::Text,
+        "none" => TypeSpec::None,
+        "list" => TypeSpec::List(None),
+        "hashset" | "set" => TypeSpec::HashSet,
+        "hashmap" | "map" => TypeSpec::HashMap,
+        "matrix" | "mat" => TypeSpec::Matrix,
+        _ => TypeSpec::Named(text.to_string()),
+    })
+}
+
+fn split_type_arguments(text: &str) -> Result<Vec<&str>, String> {
+    let mut arguments = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+
+    for (index, character) in text.char_indices() {
+        match character {
+            '[' => depth += 1,
+            ']' => {
+                if depth == 0 {
+                    return Err(format!("unmatched ']' in type annotation '{text}'"));
+                }
+                depth -= 1;
+            }
+            ',' if depth == 0 => {
+                let argument = text[start..index].trim();
+                if argument.is_empty() {
+                    return Err(format!("empty type argument in '{text}'"));
+                }
+                arguments.push(argument);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+
+    if depth != 0 {
+        return Err(format!("unmatched '[' in type annotation '{text}'"));
+    }
+
+    let last = text[start..].trim();
+    if last.is_empty() {
+        return Err(format!("empty type argument in '{text}'"));
+    }
+    arguments.push(last);
+    Ok(arguments)
+}
+
+fn resolve_type_spec(spec: TypeSpec, type_params: &[TypeParameter]) -> TypeSpec {
+    match spec {
+        TypeSpec::Named(name) => {
+            if let Some(type_param) = type_params.iter().find(|type_param| type_param.name == name) {
+                match &type_param.bound {
+                    Some(bound) => TypeSpec::Named(bound.clone()),
+                    None => TypeSpec::Any,
+                }
+            } else {
+                TypeSpec::Named(name)
+            }
+        }
+        TypeSpec::List(Some(inner)) => {
+            TypeSpec::List(Some(Box::new(resolve_type_spec(*inner, type_params))))
+        }
+        other => other,
+    }
+}
+
+fn is_iterable(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::List(_)
+            | Value::HashSet(_)
+            | Value::Map(_)
+            | Value::Matrix(_)
+            | Value::Text(_)
+    )
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -838,6 +1149,44 @@ impl<'a> Interpreter<'a> {
                 }
                 Ok(Value::list(values))
             }
+            Expr::TypedList {
+                element_type,
+                items,
+            } => {
+                let spec = parse_type_spec(element_type).map_err(|message| Error::new(line, message))?;
+                self.env
+                    .validate_type_spec(&spec)
+                    .map_err(|message| Error::new(line, message))?;
+
+                let mut values = Vec::with_capacity(items.len());
+                for item in items {
+                    values.push(self.eval(item, line)?);
+                }
+
+                if values.len() == 1 && is_iterable(&values[0]) {
+                    values = iterate(&values[0], line)?;
+                }
+
+                for (index, value) in values.iter().enumerate() {
+                    self.env
+                        .ensure_value_matches_spec(value, &spec, line)
+                        .map_err(|message| {
+                            Error::new(
+                                line,
+                                format!("List[{element_type}] item {index}: {message}"),
+                            )
+                        })?;
+                }
+
+                Ok(Value::typed_list(values, spec))
+            }
+            Expr::FormatCall { name, args } => {
+                let mut values = Vec::with_capacity(args.len());
+                for arg in args {
+                    values.push(self.eval(arg, line)?);
+                }
+                format_call(name, values, line)
+            }
             Expr::Map(entries) => {
                 let mut map = HashMap::new();
 
@@ -995,7 +1344,15 @@ impl<'a> Interpreter<'a> {
                 if values.is_empty() {
                     Ok(Value::list(Vec::new()))
                 } else if values.len() == 1 {
-                    Ok(Value::list(iterate(&values[0], line)?))
+                    let items = iterate(&values[0], line)?;
+                    let element_type = match &values[0] {
+                        Value::List(list) => list.element_type(),
+                        _ => None,
+                    };
+                    Ok(match element_type {
+                        Some(element_type) => Value::typed_list(items, element_type),
+                        None => Value::list(items),
+                    })
                 } else {
                     Err(Error::new(
                         line,
@@ -1072,7 +1429,7 @@ impl<'a> Interpreter<'a> {
         let receiver_type = receiver.type_name().to_string();
 
         let struct_value = match receiver {
-            Value::List(items) => return list_method(items, method, values, line),
+            Value::List(list) => return list_method(self.env, list, method, values, line),
             Value::Struct(struct_value) => struct_value,
             _ => {
                 return Err(Error::new(
@@ -1380,6 +1737,17 @@ impl<'a> Interpreter<'a> {
                 ));
             }
 
+            // A type parameter nested inside a container, as in
+            // `values: List[T]`, is checked by the parameter type annotation
+            // against each element instead of against the whole list.
+            if param
+                .type_annotation
+                .as_deref()
+                .is_some_and(|annotation| annotation != type_param.name)
+            {
+                continue;
+            }
+
             let value = self
                 .env
                 .get_value(&param.name)
@@ -1461,6 +1829,25 @@ impl<'a> Interpreter<'a> {
         let Some(annotation) = &param.type_annotation else {
             return Ok(());
         };
+        if annotation.contains('[') {
+            let spec = parse_type_spec(annotation).map_err(|message| Error::new(line, message))?;
+            let spec = resolve_type_spec(spec, &function.type_params);
+            self.env
+                .validate_type_spec(&spec)
+                .map_err(|message| Error::new(line, message))?;
+            self.env
+                .ensure_value_matches_spec(value, &spec, line)
+                .map_err(|message| {
+                    Error::new(
+                        line,
+                        format!(
+                            "argument '{}' to {label} must be {annotation}: {message}",
+                            param.name
+                        ),
+                    )
+                })?;
+            return Ok(());
+        }
 
         // A type parameter used as an annotation, as in `def f<T>(value: T)`,
         // accepts any value unless the type parameter has a trait bound.
@@ -1546,8 +1933,168 @@ impl<'a> Interpreter<'a> {
     }
 }
 
+fn format_call(name: &str, values: Vec<Value>, line: usize) -> Result<Value, Error> {
+    let format_string = if values.is_empty() {
+        ""
+    } else {
+        match &values[0] {
+            Value::Text(text) => text.as_str(),
+            other => {
+                return Err(Error::new(
+                    line,
+                    format!(
+                        "{name}!() format string must be text, got {}",
+                        other.type_name()
+                    ),
+                ));
+            }
+        }
+    };
+
+    let args = if values.is_empty() { &[][..] } else { &values[1..] };
+    let rendered = render_format(format_string, args, name, line)?;
+
+    match name {
+        "print" => {
+            print!("{rendered}");
+            io::stdout()
+                .flush()
+                .map_err(|error| Error::new(line, format!("couldn't flush stdout: {error}")))?;
+        }
+        "println" => println!("{rendered}"),
+        "eprint" => {
+            eprint!("{rendered}");
+            io::stderr()
+                .flush()
+                .map_err(|error| Error::new(line, format!("couldn't flush stderr: {error}")))?;
+        }
+        "eprintln" => eprintln!("{rendered}"),
+        _ => unreachable!("the parser only accepts known format macros"),
+    }
+
+    Ok(Value::None)
+}
+
+fn render_format(format: &str, args: &[Value], name: &str, line: usize) -> Result<String, Error> {
+    let characters: Vec<char> = format.chars().collect();
+    let mut output = String::new();
+    let mut position = 0usize;
+    let mut auto_index = 0usize;
+    let mut used = vec![false; args.len()];
+
+    while position < characters.len() {
+        match characters[position] {
+            '{' => {
+                if characters.get(position + 1) == Some(&'{') {
+                    output.push('{');
+                    position += 2;
+                    continue;
+                }
+
+                let start = position + 1;
+                let mut end = start;
+                while end < characters.len() && characters[end] != '}' {
+                    end += 1;
+                }
+
+                if end == characters.len() {
+                    return Err(Error::new(
+                        line,
+                        "unclosed '{' in the format string (use '{{' for a literal '{')",
+                    ));
+                }
+
+                let spec: String = characters[start..end].iter().collect();
+                let (argument_index, debug) =
+                    parse_format_spec(&spec, &mut auto_index, args.len(), name, line)?;
+                used[argument_index] = true;
+
+                if debug {
+                    output.push_str(&repr_value(&args[argument_index]));
+                } else {
+                    output.push_str(&args[argument_index].to_string());
+                }
+
+                position = end + 1;
+            }
+            '}' => {
+                if characters.get(position + 1) == Some(&'}') {
+                    output.push('}');
+                    position += 2;
+                } else {
+                    return Err(Error::new(
+                        line,
+                        "single '}' in the format string (use '}}' for a literal '}')",
+                    ));
+                }
+            }
+            character => {
+                output.push(character);
+                position += 1;
+            }
+        }
+    }
+
+    for (index, was_used) in used.iter().enumerate() {
+        if !was_used {
+            return Err(Error::new(
+                line,
+                format!("{name}!() argument {} is never used", index + 1),
+            ));
+        }
+    }
+
+    Ok(output)
+}
+
+fn parse_format_spec(
+    spec: &str,
+    auto_index: &mut usize,
+    argument_count: usize,
+    name: &str,
+    line: usize,
+) -> Result<(usize, bool), Error> {
+    let (index_part, debug) = if spec == ":?" {
+        ("", true)
+    } else if let Some(index) = spec.strip_suffix(":?") {
+        (index, true)
+    } else if spec.contains(':') {
+        return Err(Error::new(
+            line,
+            format!("unsupported format specifier '{{{spec}}}' (use {{}} or {{:?}})"),
+        ));
+    } else {
+        (spec, false)
+    };
+
+    let argument_index = if index_part.is_empty() {
+        let index = *auto_index;
+        *auto_index += 1;
+        index
+    } else {
+        index_part.parse::<usize>().map_err(|_| {
+            Error::new(
+                line,
+                format!("invalid argument index '{index_part}' in format string"),
+            )
+        })?
+    };
+
+    if argument_index >= argument_count {
+        return Err(Error::new(
+            line,
+            format!(
+                "format string references argument {argument_index}, but only {argument_count} given to {name}!"
+            ),
+        ));
+    }
+
+    Ok((argument_index, debug))
+}
+
 fn list_method(
-    items: Rc<RefCell<Vec<Value>>>,
+    env: &Env,
+    list: Rc<ListValue>,
     method: &str,
     args: Vec<Value>,
     line: usize,
@@ -1555,26 +2102,31 @@ fn list_method(
     match method {
         "append" => {
             expect_arity("list.append", &args, 1, line)?;
-            items.borrow_mut().push(args[0].clone());
+            ensure_list_element(env, &list, &args[0], line)?;
+            list.items.borrow_mut().push(args[0].clone());
             Ok(Value::None)
         }
         "extend" => {
             expect_arity("list.extend", &args, 1, line)?;
             let new_items = iterate(&args[0], line)?;
-            items.borrow_mut().extend(new_items);
+            for item in &new_items {
+                ensure_list_element(env, &list, item, line)?;
+            }
+            list.items.borrow_mut().extend(new_items);
             Ok(Value::None)
         }
         "insert" => {
             expect_arity("list.insert", &args, 2, line)?;
             let index = int_arg("list.insert", &args[0], line)?;
-            let len = items.borrow().len();
+            ensure_list_element(env, &list, &args[1], line)?;
+            let len = list.items.borrow().len();
             let index = clamp_insert_index(index, len);
-            items.borrow_mut().insert(index, args[1].clone());
+            list.items.borrow_mut().insert(index, args[1].clone());
             Ok(Value::None)
         }
         "remove" => {
             expect_arity("list.remove", &args, 1, line)?;
-            let mut items = items.borrow_mut();
+            let mut items = list.items.borrow_mut();
             let Some(index) = items
                 .iter()
                 .position(|item| equal(item, &args[0]))
@@ -1599,7 +2151,7 @@ fn list_method(
                 ));
             };
 
-            let mut items = items.borrow_mut();
+            let mut items = list.items.borrow_mut();
             if items.is_empty() {
                 return Err(Error::new(line, "pop from empty list"));
             }
@@ -1621,16 +2173,20 @@ fn list_method(
         }
         "clear" => {
             expect_arity("list.clear", &args, 0, line)?;
-            items.borrow_mut().clear();
+            list.items.borrow_mut().clear();
             Ok(Value::None)
         }
         "copy" => {
             expect_arity("list.copy", &args, 0, line)?;
-            Ok(Value::list(items.borrow().clone()))
+            let items = list.items.borrow().clone();
+            Ok(match list.element_type() {
+                Some(element_type) => Value::typed_list(items, element_type),
+                None => Value::list(items),
+            })
         }
         "index" => {
             expect_arity("list.index", &args, 1, line)?;
-            let items = items.borrow();
+            let items = list.items.borrow();
             let Some(index) = items.iter().position(|item| equal(item, &args[0])) else {
                 return Err(Error::new(
                     line,
@@ -1641,7 +2197,8 @@ fn list_method(
         }
         "count" => {
             expect_arity("list.count", &args, 1, line)?;
-            let count = items
+            let count = list
+                .items
                 .borrow()
                 .iter()
                 .filter(|item| equal(item, &args[0]))
@@ -1650,12 +2207,12 @@ fn list_method(
         }
         "reverse" => {
             expect_arity("list.reverse", &args, 0, line)?;
-            items.borrow_mut().reverse();
+            list.items.borrow_mut().reverse();
             Ok(Value::None)
         }
         "sort" => {
             expect_arity("list.sort", &args, 0, line)?;
-            sort_list(&mut items.borrow_mut(), line)?;
+            sort_list(&mut list.items.borrow_mut(), line)?;
             Ok(Value::None)
         }
         _ => Err(Error::new(
@@ -1665,6 +2222,19 @@ fn list_method(
             ),
         )),
     }
+}
+
+fn ensure_list_element(
+    env: &Env,
+    list: &ListValue,
+    value: &Value,
+    line: usize,
+) -> Result<(), Error> {
+    if let Some(element_type) = list.element_type() {
+        env.ensure_value_matches_spec(value, &element_type, line)
+            .map_err(|message| Error::new(line, message))?;
+    }
+    Ok(())
 }
 
 fn expect_arity(label: &str, args: &[Value], expected: usize, line: usize) -> Result<(), Error> {
@@ -1745,7 +2315,7 @@ fn number_value(value: &Value) -> f64 {
 
 fn length_of(value: &Value) -> Option<usize> {
     match value {
-        Value::List(items) => Some(items.borrow().len()),
+        Value::List(list) => Some(list.items.borrow().len()),
         Value::Text(text) => Some(text.chars().count()),
         Value::HashSet(items) => Some(items.len()),
         Value::Map(entries) => Some(entries.len()),
@@ -1896,7 +2466,7 @@ fn equal(left: &Value, right: &Value) -> bool {
 
 fn membership(value: &Value, container: &Value, line: usize) -> Result<bool, Error> {
     match container {
-        Value::List(items) => Ok(items.borrow().iter().any(|item| equal(item, value))),
+        Value::List(list) => Ok(list.items.borrow().iter().any(|item| equal(item, value))),
         Value::Text(text) => match value {
             Value::Text(needle) => Ok(text.contains(needle)),
             other => Err(Error::new(
@@ -1930,9 +2500,15 @@ fn add(left: Value, right: Value, line: usize) -> Result<Value, Error> {
             .ok_or_else(|| Error::new(line, "integer overflow")),
         (Value::Text(a), Value::Text(b)) => Ok(Value::Text(format!("{a}{b}"))),
         (Value::List(a), Value::List(b)) => {
-            let mut items = a.borrow().clone();
-            items.extend(b.borrow().iter().cloned());
-            Ok(Value::list(items))
+            let mut items = a.items.borrow().clone();
+            items.extend(b.items.borrow().iter().cloned());
+            let element_type = a.element_type();
+            Ok(match (element_type, b.element_type()) {
+                (Some(a_type), Some(b_type)) if a_type == b_type => {
+                    Value::typed_list(items, a_type)
+                }
+                _ => Value::list(items),
+            })
         }
         _ => match float_pair(&left, &right) {
             Some((a, b)) => Ok(Value::Float(a + b)),
@@ -1941,19 +2517,25 @@ fn add(left: Value, right: Value, line: usize) -> Result<Value, Error> {
     }
 }
 
-fn repeat_list(items: &Rc<RefCell<Vec<Value>>>, count: i64) -> Result<Value, Error> {
+fn repeat_list(list: &Rc<ListValue>, count: i64) -> Result<Value, Error> {
     if count <= 0 {
-        return Ok(Value::list(Vec::new()));
+        return Ok(match list.element_type() {
+            Some(element_type) => Value::typed_list(Vec::new(), element_type),
+            None => Value::list(Vec::new()),
+        });
     }
 
-    let source = items.borrow();
+    let source = list.items.borrow();
     let mut result = Vec::with_capacity(source.len().saturating_mul(count as usize));
 
     for _ in 0..count {
         result.extend(source.iter().cloned());
     }
 
-    Ok(Value::list(result))
+    Ok(match list.element_type() {
+        Some(element_type) => Value::typed_list(result, element_type),
+        None => Value::list(result),
+    })
 }
 
 fn arithmetic(op: BinaryOp, left: Value, right: Value, line: usize) -> Result<Value, Error> {
@@ -2079,7 +2661,7 @@ fn type_error(action: &str, left: &Value, right: &Value, line: usize) -> Error {
 
 fn iterate(value: &Value, line: usize) -> Result<Vec<Value>, Error> {
     match value {
-        Value::List(items) => Ok(items.borrow().clone()),
+        Value::List(list) => Ok(list.items.borrow().clone()),
         Value::HashSet(items) => Ok(items.iter().map(set_item_to_value).collect()),
         Value::Map(entries) => {
             let mut keys: Vec<&SetItem> = entries.keys().collect();
@@ -2172,7 +2754,7 @@ fn index_value(object: Value, index: Value, line: usize) -> Result<Value, Error>
                 .cloned()
                 .ok_or_else(|| Error::new(line, format!("hashmap key {key} not found")))
         }
-        Value::List(items) => {
+        Value::List(list) => {
             let type_name = index.type_name().to_string();
             let Value::Int(position) = index else {
                 return Err(Error::new(
@@ -2181,7 +2763,7 @@ fn index_value(object: Value, index: Value, line: usize) -> Result<Value, Error>
                 ));
             };
 
-            let items = items.borrow();
+            let items = list.items.borrow();
             let resolved = resolve_index(position, items.len()).ok_or_else(|| {
                 Error::new(
                     line,
@@ -2232,14 +2814,18 @@ fn slice_value(
     line: usize,
 ) -> Result<Value, Error> {
     match object {
-        Value::List(items) => {
-            let items = items.borrow();
+        Value::List(list) => {
+            let items = list.items.borrow();
             let (start, stop, step) = normalize_slice(items.len(), start, stop, step, line)?;
-            let result = indices_from_parts(start, stop, step)
+            let result: Vec<Value> = indices_from_parts(start, stop, step)
                 .into_iter()
                 .map(|index| items[index].clone())
                 .collect();
-            Ok(Value::list(result))
+            drop(items);
+            Ok(match list.element_type() {
+                Some(element_type) => Value::typed_list(result, element_type),
+                None => Value::list(result),
+            })
         }
         Value::Text(text) => {
             let chars: Vec<char> = text.chars().collect();
@@ -2930,6 +3516,138 @@ mod tests {
     }
 
     #[test]
+    fn typed_lists_enforce_their_element_type() {
+        let env = env_after(
+            "xs = List[Int](1, 2, 3)\n\
+             xs.append(4)\n\
+             from_source = List[Int]([5, 6])\n\
+             words = List[Text](\"a\", \"b\")\n\
+             nested = List[List[Int]]([[1], [2, 3]])\n\
+             nested[0].append(4)\n\
+             def total(values: List[Int]) {\n\
+             \x20   result = 0\n\
+             \x20   for value in values { result = result + value }\n\
+             \x20   result\n\
+             }\n\
+             plain = [10, 20]\n\
+             sum = total(plain)\n\
+             plain.append(30)",
+        );
+
+        assert_eq!(env.get_value("xs").unwrap().to_string(), "[1, 2, 3, 4]");
+        assert_eq!(
+            env.get_value("from_source").unwrap().to_string(),
+            "[5, 6]"
+        );
+        assert_eq!(
+            env.get_value("words").unwrap().to_string(),
+            "[\"a\", \"b\"]"
+        );
+        assert_eq!(
+            env.get_value("nested").unwrap().to_string(),
+            "[[1, 4], [2, 3]]"
+        );
+        assert_eq!(env.get_value("sum").unwrap(), Value::Int(30));
+        assert_eq!(
+            env.get_value("plain").unwrap().to_string(),
+            "[10, 20, 30]"
+        );
+    }
+
+    #[test]
+    fn typed_lists_reject_wrong_element_types() {
+        let error = error_of("xs = List[Int](1, 2)\nxs.append(\"x\")");
+        assert!(error.message.contains("expected Int, got text"), "{error}");
+        assert_eq!(error.line, 2);
+
+        let error = error_of("xs = List[Int](1, 2)\nxs[0] = \"x\"");
+        assert!(error.message.contains("expected Int, got text"), "{error}");
+        assert_eq!(error.line, 2);
+
+        let error = error_of("xs = List[Int](1, 2)\nxs[0:1] = [\"x\"]");
+        assert!(error.message.contains("expected Int, got text"), "{error}");
+        assert_eq!(error.line, 2);
+
+        let error = error_of("xs = List[Int](1, \"x\")");
+        assert!(error.message.contains("item 1"), "{error}");
+        assert!(error.message.contains("expected Int, got text"), "{error}");
+
+        let error = error_of(
+            "def total(values: List[Int]) {\n\
+             \x20   return 0\n\
+             }\n\
+             total([1, \"x\"])",
+        );
+        assert!(error.message.contains("list element at index 1"), "{error}");
+        assert_eq!(error.line, 4);
+
+        let error = error_of(
+            "def total(values: List[Text]) {\n\
+             \x20   return 0\n\
+             }\n\
+             total(List[Int](1))",
+        );
+        assert!(
+            error.message.contains("must be List[Text]"),
+            "{error}"
+        );
+
+        let error = error_of("xs = List[Missing](1)");
+        assert!(
+            error.message.contains("unknown type annotation 'Missing'"),
+            "{error}"
+        );
+
+        let error = error_of("xs = List[Int]()\nxs.append(True)");
+        assert!(error.message.contains("expected Int, got bool"), "{error}");
+    }
+
+    #[test]
+    fn typed_lists_support_structs_traits_and_type_parameters() {
+        let env = env_after(
+            "trait Named {\n\
+             \x20   def name(self)\n\
+             }\n\
+             struct Person { name = \"\" }\n\
+             impl Named for Person {\n\
+             \x20   def name(self) { return self.name }\n\
+             }\n\
+             people = List[Named](Person(\"Ada\"), Person(\"Nirab\"))\n\
+             people.append(Person(\"Grace\"))\n\
+             def first_name(values: List[Person]) { return values[0].name }\n\
+             first = first_name(List[Person](Person(\"Linus\")))\n\
+             def any_name<T: Named>(values: List[T]) { return values[0].name() }\n\
+             name = any_name(people)",
+        );
+
+        assert_eq!(
+            env.get_value("first").unwrap(),
+            Value::Text("Linus".into())
+        );
+        assert_eq!(env.get_value("name").unwrap(), Value::Text("Ada".into()));
+        assert!(env
+            .get_value("people")
+            .unwrap()
+            .to_string()
+            .contains("Grace"));
+
+        let error = error_of(
+            "trait Named { def name(self) }\n\
+             struct Person { name = \"\" }\n\
+             impl Named for Person { def name(self) { return self.name } }\n\
+             people = List[Named](Person(\"Ada\"))\n\
+             people.append(1)",
+        );
+        assert!(
+            error
+                .message
+                .contains("expected a value implementing trait 'Named', got int"),
+            "{error}"
+        );
+        assert_eq!(error.line, 5);
+    }
+
+    #[test]
     fn hashmaps_support_literals_indexing_and_assignment() {
         let env = env_after(
             "scores = {\"a\": 1, \"b\": 2}\n\
@@ -3571,6 +4289,80 @@ mod tests {
         );
 
         assert_eq!(env.get_value("counter").unwrap(), Value::Int(2));
+    }
+
+    #[test]
+    fn format_macros_render_placeholders_and_escapes() {
+        let render = |format: &str, args: &[Value]| {
+            render_format(format, args, "println", 1).unwrap()
+        };
+
+        assert_eq!(
+            render("Hello, {}!", &[Value::Text("Nirab".into())]),
+            "Hello, Nirab!"
+        );
+        assert_eq!(
+            render(
+                "{} + {} = {}",
+                &[Value::Int(1), Value::Int(2), Value::Int(3)]
+            ),
+            "1 + 2 = 3"
+        );
+        assert_eq!(
+            render(
+                "{1} then {0}",
+                &[Value::Text("a".into()), Value::Text("b".into())]
+            ),
+            "b then a"
+        );
+        assert_eq!(render("{{}} and {}", &[Value::Int(7)]), "{} and 7");
+        assert_eq!(
+            render(
+                "debug {:?}",
+                &[Value::list(vec![
+                    Value::Int(1),
+                    Value::Text("two".into())
+                ])]
+            ),
+            "debug [1, \"two\"]"
+        );
+        assert_eq!(render("no placeholders", &[]), "no placeholders");
+    }
+
+    #[test]
+    fn format_macros_report_format_string_errors() {
+        let error = error_of("println!(\"{}\")");
+        assert!(error.message.contains("references argument 0"), "{error}");
+
+        let error = error_of("println!(\"{}\", 1, 2)");
+        assert!(
+            error.message.contains("argument 2 is never used"),
+            "{error}"
+        );
+
+        let error = error_of("println!(\"{x}\", 1)");
+        assert!(error.message.contains("invalid argument index 'x'"), "{error}");
+
+        let error = error_of("println!(\"{\", 1)");
+        assert!(error.message.contains("unclosed '{'"), "{error}");
+
+        let error = error_of("println!(\"}\", 1)");
+        assert!(error.message.contains("single '}'"), "{error}");
+
+        let error = error_of("println!(\"{:>5}\", 1)");
+        assert!(
+            error.message.contains("unsupported format specifier"),
+            "{error}"
+        );
+
+        let error = error_of("println!(1)");
+        assert!(error.message.contains("format string must be text"), "{error}");
+
+        let error = error_of("foo!(1)");
+        assert!(
+            error.message.contains("unknown format macro 'foo!'"),
+            "{error}"
+        );
     }
 
     #[test]

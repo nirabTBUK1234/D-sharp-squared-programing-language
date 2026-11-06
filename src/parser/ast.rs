@@ -78,6 +78,14 @@ pub enum Expr {
     Text(String),
     Var(String),
     List(Vec<Expr>),
+    TypedList {
+        element_type: String,
+        items: Vec<Expr>,
+    },
+    FormatCall {
+        name: String,
+        args: Vec<Expr>,
+    },
     Map(Vec<(Expr, Expr)>),
     Matrix(Vec<(String, Vec<(String, Expr)>)>),
     Index {

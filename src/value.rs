@@ -5,6 +5,93 @@ use std::{
     rc::Rc,
 };
 
+/// A runtime type description used by parameter annotations and typed lists.
+/// `List` carries an optional element type; bare `List` has `None` and only
+/// checks that the value is a list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TypeSpec {
+    Any,
+    Int,
+    Float,
+    Number,
+    Bool,
+    Text,
+    None,
+    List(Option<Box<TypeSpec>>),
+    HashSet,
+    HashMap,
+    Matrix,
+    /// A struct, trait, or unresolved type-parameter name.
+    Named(String),
+}
+
+impl fmt::Display for TypeSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TypeSpec::Any => write!(f, "Any"),
+            TypeSpec::Int => write!(f, "Int"),
+            TypeSpec::Float => write!(f, "Float"),
+            TypeSpec::Number => write!(f, "Number"),
+            TypeSpec::Bool => write!(f, "Bool"),
+            TypeSpec::Text => write!(f, "Text"),
+            TypeSpec::None => write!(f, "None"),
+            TypeSpec::List(None) => write!(f, "List"),
+            TypeSpec::List(Some(inner)) => write!(f, "List[{inner}]"),
+            TypeSpec::HashSet => write!(f, "HashSet"),
+            TypeSpec::HashMap => write!(f, "HashMap"),
+            TypeSpec::Matrix => write!(f, "Matrix"),
+            TypeSpec::Named(name) => write!(f, "{name}"),
+        }
+    }
+}
+
+/// A Python-style list with optional element-type enforcement. The list data
+/// and the element type live behind the same shared `Rc`, so aliases see both.
+#[derive(Debug)]
+pub struct ListValue {
+    pub items: RefCell<Vec<Value>>,
+    pub element_type: RefCell<Option<TypeSpec>>,
+}
+
+impl ListValue {
+    pub fn new(items: Vec<Value>) -> Self {
+        ListValue {
+            items: RefCell::new(items),
+            element_type: RefCell::new(None),
+        }
+    }
+
+    pub fn typed(items: Vec<Value>, element_type: TypeSpec) -> Self {
+        ListValue {
+            items: RefCell::new(items),
+            element_type: RefCell::new(Some(element_type)),
+        }
+    }
+
+    pub fn element_type(&self) -> Option<TypeSpec> {
+        self.element_type.borrow().clone()
+    }
+
+    /// Attaches an element type to an untyped list. Returns `false` when the
+    /// list already has a different element type.
+    pub fn promote(&self, element_type: TypeSpec) -> bool {
+        let mut current = self.element_type.borrow_mut();
+        match current.as_ref() {
+            None => {
+                *current = Some(element_type);
+                true
+            }
+            Some(existing) => *existing == element_type,
+        }
+    }
+}
+
+impl PartialEq for ListValue {
+    fn eq(&self, other: &Self) -> bool {
+        *self.items.borrow() == *other.items.borrow()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SetItem {
     Int(i64),
@@ -42,7 +129,7 @@ impl SetItem {
 }
 
 /// Inside collections, text is quoted so the output looks like the literal.
-fn repr_value(value: &Value) -> String {
+pub fn repr_value(value: &Value) -> String {
     match value {
         Value::Text(text) => format!("\"{}\"", escape_text(text)),
         other => other.to_string(),
@@ -89,9 +176,9 @@ pub enum Value {
     Float(f64),
     Bool(bool),
     Text(String),
-    /// `[1, 2, 3]`: a Python-style mutable list. The `Rc<RefCell<...>>`
-    /// makes assignment and method calls share the same list, like Python.
-    List(Rc<RefCell<Vec<Value>>>),
+    /// `[1, 2, 3]`: a Python-style mutable list. The `Rc<ListValue>` makes
+    /// assignment and method calls share the same list, like Python.
+    List(Rc<ListValue>),
     HashSet(HashSet<SetItem>),
     Matrix(HashMap<String, HashMap<String, Value>>),
     /// `{"a": 1}`: Python-style dictionary keyed by hashable scalars.
@@ -105,7 +192,11 @@ pub enum Value {
 
 impl Value {
     pub fn list(items: Vec<Value>) -> Value {
-        Value::List(Rc::new(RefCell::new(items)))
+        Value::List(Rc::new(ListValue::new(items)))
+    }
+
+    pub fn typed_list(items: Vec<Value>, element_type: TypeSpec) -> Value {
+        Value::List(Rc::new(ListValue::typed(items, element_type)))
     }
 
     pub fn type_name(&self) -> &str {
@@ -131,8 +222,8 @@ impl fmt::Display for Value {
             Value::Float(n) => write!(f, "{n}"),
             Value::Bool(b) => write!(f, "{}", bool_text(*b)),
             Value::Text(s) => write!(f, "{s}"),
-            Value::List(items) => {
-                let parts: Vec<String> = items.borrow().iter().map(repr_value).collect();
+            Value::List(list) => {
+                let parts: Vec<String> = list.items.borrow().iter().map(repr_value).collect();
                 write!(f, "[{}]", parts.join(", "))
             }
             Value::HashSet(items) => {

@@ -6,6 +6,49 @@ Release history for D#².
 Each release lists the language changes and the notes that matter for users.
 """
 
+## v1.4.0 — 2026-11-06
+
+"""
+Typed lists and Rust-style formatted output.
+"""
+
+### Language
+
+"""
+
+- `List[Int](...)` creates a list whose element type is enforced at runtime.
+  Element types may be built-ins, structs, traits, type parameters, or nested
+  lists such as `List[List[Int]]`.
+- Typed-list checks apply on construction and on every mutation: `append`,
+  `extend`, `insert`, index assignment, slice assignment, and slice deletion
+  leave the element type intact.
+- `List[Int](iterable)` expands a single iterable argument like `list(...)`.
+  Slicing, `copy()`, and repetition with `*` preserve the element type.
+- Passing an untyped list to a `List[Int]` parameter promotes the list to
+  `Int`, so later mutations through that list are checked too. Bare `List`
+  still requires only that the value is a list.
+- `print!`, `println!`, `eprint!`, and `eprintln!` take a format string and
+  values. `{}` prints a value, `{:?}` prints its repr form, explicit indices
+  such as `{0}`/`{1:?}` select arguments, and `{{`/`}}` escape literal braces.
+- Format strings are validated: the string must be text, placeholders must
+  reference existing arguments, and unused arguments are reported.
+
+"""
+
+### Notes
+
+"""
+
+- Typed lists are checked dynamically, not statically. Errors name the failed
+  element type, for example `expected Int, got text`.
+- The format macros intentionally support only `{}` and `{:?}`. Width,
+  alignment, and named arguments are not implemented yet.
+- `println!` is a macro-like call parsed as an expression; `foo!(...)` is
+  rejected with an unknown-format-macro error.
+- Rust-style ranges such as `1..100.step_by(2)` are not part of this release.
+
+"""
+
 ## v1.3.0 — 2026-11-06
 
 """

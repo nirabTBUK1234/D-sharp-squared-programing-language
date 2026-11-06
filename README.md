@@ -6,16 +6,20 @@ A small, interpreted programming language implemented in Rust. The keywords are
 Pythonic (`def`, `if`/`elif`/`else`, `x = 1`, `True`/`False`/`None`, `#`
 comments) but blocks use braces instead of indentation. It has a real lexer and
 recursive-descent parser, functions with defaults and recursion, loops,
-hashsets, hashmaps, matrices, Python-style lists, structs with `impl` methods,
+hashsets, hashmaps, matrices, Python-style lists, type-enforced lists,
+Rust-style formatted output, structs with `impl` methods,
 traits and trait-bounded functions, token macros, multifile imports, console
 built-ins, and a REPL.
 
 It is still an early prototype: no namespaced modules, `match`/enums, or
 closures yet — see [Roadmap](#roadmap) and [Known limitations](#known-limitations).
 
-- **v1.3.0** — current release (2026-11-06): Python-style lists with slicing and
+- **v1.4.0** — current release (2026-11-06): type-enforced lists
+  (`List[Int]`), nested typed lists, and Rust-style `print!`/`println!` format
+  macros.
+- **v1.3.0** — Python-style lists with slicing and
   methods, multifile imports, typed parameters, two-variable hashmap loops, and
-  implicit final-expression returns.
+  implicit final-expression returns (2026-11-06).
 - **v1.2.0** — structs with default fields, `impl` methods, traits with
   required/default methods, trait-bounded functions, and `name$(...)` token
   macros (2026-11-02).
@@ -117,6 +121,7 @@ console built-ins.
 | Bool | `True`, `False` | `true`/`false` are also accepted |
 | Text | `"hello"`, `'hi there'` | Supports indexing and slicing |
 | List | `[1, 2, 3]`, `[]` | Mutable, reference-shared, mixed values; indexing, slicing, and methods |
+| Typed list | `List[Int](1, 2, 3)` | A list whose items are checked against one element type |
 | Hashset | `hashSet(1, 2, 2)` / `set(1, 2)` | Duplicates collapse; scalars only |
 | Hashmap | `{"a": 1, "b": 2}` | Keys can be int, float, bool, or text; read/write with `[ ]` |
 | Matrix | `mat{row1: {a: 1, b: 2}}` | Named rows of named cells; `matrix`/`matrex` are aliases |
@@ -216,7 +221,8 @@ print(double(4))               # 8
 - A parameter may be annotated as `name: Type`, for example `x: Int`. Built-in
   annotations are `Int`, `Float`, `Number`, `Bool`, `Text`, `Any`, `List`,
   `HashSet`, `HashMap`, and `Matrix`; a struct, trait, or type-parameter name can
-  also be used. Annotations are checked when the function is called.
+  also be used. Annotations are checked when the function is called. Use
+  `List[Int]` (or `List[List[Text]]`, and so on) to require one element type.
 - Defaults are evaluated when the function is called, in the function's scope,
   so they can refer to earlier parameters.
 - `return` ends the function and returns a value. A bare final expression is
@@ -555,6 +561,29 @@ List methods: `append`, `extend`, `insert`, `remove`, `pop`, `clear`, `index`,
 matrix row names. `a + b` concatenates lists and `a * n` repeats one. `sort()`
 works on lists containing only numbers, only text, or only bools.
 
+**Typed lists.** `List[Int](...)` builds a list that only accepts `Int` items.
+The element type is checked at runtime on construction and on every mutation,
+including `append`, `extend`, `insert`, index assignment, and slice assignment.
+Nested types work too: `List[List[Int]]`, `List[Text]`, `List[Person]`, and
+`List[Named]` for a trait.
+
+```text
+scores = List[Int](1, 2, 3)
+scores.append(4)             # ok
+scores.append("five")        # error: expected Int, got text
+
+rows = List[List[Int]]([[1, 2], [3]])
+rows[0].append(4)            # [[1, 2, 4], [3]]
+
+names = List[Text]("Ada", "Linus")
+```
+
+`List[Int](iterable)` expands a single list, text, hashset, hashmap, or matrix
+argument like `list(iterable)`. Slicing, `copy()`, and `*` keep the element
+type. A function annotated `values: List[Int]` also promotes an untyped list
+argument to `Int`, so later mutations through the same list are checked. Bare
+`List` only requires a list and leaves its items mixed.
+
 **Hashsets.** `hashSet(...)` builds a set from its arguments (`set(...)` and
 `hashset(...)` are aliases); duplicates collapse, and `hashSet()` is empty.
 Items must be Int, Float, Bool, or Text — nesting a list, hashset, hashmap, or
@@ -627,6 +656,28 @@ print("Hi " + name)
 ```
 
 Printing an empty line: `print("")` (or `console.println("")`).
+
+**Rust-style formatted output.** `print!`, `println!`, `eprint!`, and
+`eprintln!` take a format string followed by values. `{}` prints the next value,
+`{:?}` prints its debug/repr form (text quoted inside collections), and an
+explicit index such as `{0}` or `{1:?}` selects an argument. Escapes `{{` and
+`}}` produce literal braces.
+
+```text
+name = "Nirab"
+scores = [91, 88, 95]
+
+println!("Hello, {}!", name)              # Hello, Nirab!
+println!("scores: {:?}", scores)          # scores: [91, 88, 95]
+println!("{1} then {0}", "first", "second")  # second then first
+println!("literal braces: {{}}")          # literal braces: {}
+print!("no newline")
+eprintln!("error: {}", "something failed")
+```
+
+The format string must be text, every argument must be used, and a placeholder
+must have a matching argument. Only `{}` and `{:?}` are supported; width and
+alignment specifiers such as `{:>5}` are rejected with an error.
 
 """
 

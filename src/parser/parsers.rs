@@ -526,6 +526,32 @@ impl Parser {
         Ok(())
     }
 
+    fn type_annotation(&mut self) -> Result<String, Error> {
+        let name = self.consume_identifier("expected a type name after ':'")?;
+
+        if !self.match_kind(&TokenKind::LeftBracket) {
+            return Ok(name);
+        }
+
+        self.skip_newlines();
+        let mut arguments: Vec<String> = Vec::new();
+        loop {
+            arguments.push(self.type_annotation()?);
+            self.skip_newlines();
+            if self.match_kind(&TokenKind::Comma) {
+                self.skip_newlines();
+                continue;
+            }
+            break;
+        }
+
+        self.consume(
+            &TokenKind::RightBracket,
+            "expected ']' after type arguments",
+        )?;
+        Ok(format!("{name}[{}]", arguments.join(", ")))
+    }
+
     fn parameters(&mut self) -> Result<Vec<Parameter>, Error> {
         let mut params: Vec<Parameter> = Vec::new();
         let mut seen_default = false;
@@ -540,7 +566,7 @@ impl Parser {
             let name = self.consume_identifier("expected a parameter name")?;
 
             let type_annotation = if self.match_kind(&TokenKind::Colon) {
-                Some(self.consume_identifier("expected a type name after ':'")?)
+                Some(self.type_annotation()?)
             } else {
                 None
             };
@@ -1421,6 +1447,45 @@ impl Parser {
                 }
 
                 self.advance();
+
+                if name.eq_ignore_ascii_case("list") && self.check(&TokenKind::LeftBracket) {
+                    self.advance();
+                    let element_type = self.type_annotation()?;
+                    self.skip_newlines();
+                    self.consume(
+                        &TokenKind::RightBracket,
+                        "expected ']' after the list element type",
+                    )?;
+                    self.skip_newlines();
+                    self.consume(
+                        &TokenKind::LeftParen,
+                        "expected '(' after List[...] to list its values",
+                    )?;
+                    let items = self.arguments()?;
+                    return Ok(Expr::TypedList {
+                        element_type,
+                        items,
+                    });
+                }
+
+                if self.check(&TokenKind::Not) && self.next_is(&TokenKind::LeftParen) {
+                    if !matches!(name.as_str(), "print" | "println" | "eprint" | "eprintln") {
+                        return Err(Error::new(
+                            line,
+                            format!(
+                                "unknown format macro '{name}!' (use print!, println!, eprint!, or eprintln!)"
+                            ),
+                        ));
+                    }
+
+                    self.advance();
+                    self.consume(
+                        &TokenKind::LeftParen,
+                        "expected '(' after the format macro name",
+                    )?;
+                    let args = self.arguments()?;
+                    return Ok(Expr::FormatCall { name, args });
+                }
 
                 if self.match_kind(&TokenKind::LeftParen) {
                     let args = self.arguments()?;
