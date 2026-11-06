@@ -14,6 +14,8 @@ pub enum BinaryOp {
     GreaterEqual,
     Less,
     LessEqual,
+    In,
+    NotIn,
     Add,
     Subtract,
     Multiply,
@@ -24,6 +26,9 @@ pub enum BinaryOp {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Parameter {
     pub name: String,
+    /// Optional `name: Type` annotation. The interpreter checks it when the
+    /// function is called.
+    pub type_annotation: Option<String>,
     pub default: Option<Expr>,
 }
 
@@ -72,11 +77,18 @@ pub enum Expr {
     None,
     Text(String),
     Var(String),
+    List(Vec<Expr>),
     Map(Vec<(Expr, Expr)>),
     Matrix(Vec<(String, Vec<(String, Expr)>)>),
     Index {
         object: Box<Expr>,
         index: Box<Expr>,
+    },
+    Slice {
+        object: Box<Expr>,
+        start: Option<Box<Expr>>,
+        stop: Option<Box<Expr>>,
+        step: Option<Box<Expr>>,
     },
     Field {
         object: Box<Expr>,
@@ -108,6 +120,23 @@ pub enum StmtKind {
         name: String,
         index: Expr,
         value: Expr,
+    },
+    SliceAssign {
+        name: String,
+        start: Option<Expr>,
+        stop: Option<Expr>,
+        step: Option<Expr>,
+        value: Expr,
+    },
+    DeleteIndex {
+        name: String,
+        index: Expr,
+    },
+    DeleteSlice {
+        name: String,
+        start: Option<Expr>,
+        stop: Option<Expr>,
+        step: Option<Expr>,
     },
     FieldAssign {
         name: String,
@@ -150,13 +179,22 @@ pub enum StmtKind {
         body: Vec<Stmt>,
     },
     For {
-        name: String,
+        /// One name for a normal loop, or two names for a hashmap entry loop
+        /// (`for key, value in map`).
+        names: Vec<String>,
         iterable: Expr,
         body: Vec<Stmt>,
     },
     Break,
     Continue,
     Block(Vec<Stmt>),
+    /// Statements produced by an `import`. The runtime executes this file at
+    /// most once, and labels any error from it with `file`.
+    SourceFile {
+        file: String,
+        key: String,
+        statements: Vec<Stmt>,
+    },
     Expression(Expr),
 }
 

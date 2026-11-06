@@ -1,6 +1,8 @@
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet},
     fmt,
+    rc::Rc,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -32,6 +34,7 @@ impl SetItem {
             Value::HashSet(_) => Err("hashset items cannot be another hashset".to_string()),
             Value::Matrix(_) => Err("hashset items cannot be a matrix".to_string()),
             Value::Map(_) => Err("hashset items cannot be a hashmap".to_string()),
+            Value::List(_) => Err("hashset items cannot be a list".to_string()),
             Value::Struct(_) => Err("hashset items cannot be a struct".to_string()),
             Value::None => Err("hashset items cannot be None".to_string()),
         }
@@ -86,6 +89,9 @@ pub enum Value {
     Float(f64),
     Bool(bool),
     Text(String),
+    /// `[1, 2, 3]`: a Python-style mutable list. The `Rc<RefCell<...>>`
+    /// makes assignment and method calls share the same list, like Python.
+    List(Rc<RefCell<Vec<Value>>>),
     HashSet(HashSet<SetItem>),
     Matrix(HashMap<String, HashMap<String, Value>>),
     /// `{"a": 1}`: Python-style dictionary keyed by hashable scalars.
@@ -98,12 +104,17 @@ pub enum Value {
 }
 
 impl Value {
+    pub fn list(items: Vec<Value>) -> Value {
+        Value::List(Rc::new(RefCell::new(items)))
+    }
+
     pub fn type_name(&self) -> &str {
         match self {
             Value::Int(_) => "int",
             Value::Float(_) => "float",
             Value::Bool(_) => "bool",
             Value::Text(_) => "text",
+            Value::List(_) => "list",
             Value::HashSet(_) => "hashset",
             Value::Matrix(_) => "matrix",
             Value::Map(_) => "hashmap",
@@ -120,6 +131,10 @@ impl fmt::Display for Value {
             Value::Float(n) => write!(f, "{n}"),
             Value::Bool(b) => write!(f, "{}", bool_text(*b)),
             Value::Text(s) => write!(f, "{s}"),
+            Value::List(items) => {
+                let parts: Vec<String> = items.borrow().iter().map(repr_value).collect();
+                write!(f, "[{}]", parts.join(", "))
+            }
             Value::HashSet(items) => {
                 let mut parts: Vec<String> = items.iter().map(ToString::to_string).collect();
                 parts.sort();

@@ -1,4 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use crate::error::Error;
 use crate::lexer::{Token, TokenKind, lex};
@@ -12,6 +14,16 @@ pub struct Parser {
     current: usize,
     macros: HashMap<String, MacroDef>,
     macro_depth: usize,
+    /// The file being parsed. `None` means an in-memory snippet such as a REPL
+    /// line or a test.
+    current_file: Option<PathBuf>,
+    /// Directory used to resolve relative imports.
+    base_dir: PathBuf,
+    /// Directory containing the running interpreter, searched before the
+    /// importing file's directory for bare imports.
+    install_dir: Option<PathBuf>,
+    /// Import paths currently being parsed, for cycle detection.
+    loading: HashSet<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -23,13 +35,51 @@ struct MacroDef {
 impl Parser {
     pub fn parse(source: &str) -> Result<Vec<Stmt>, Error> {
         let tokens = lex(source)?;
+        let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let mut parser = Parser {
             tokens,
             current: 0,
             macros: HashMap::new(),
             macro_depth: 0,
+            current_file: None,
+            base_dir,
+            install_dir: installation_dir(),
+            loading: HashSet::new(),
         };
         parser.program()
+    }
+
+    /// Parses a script from disk, resolving its imports relative to the file.
+    pub fn parse_file(path: &Path) -> Result<Vec<Stmt>, Error> {
+        Self::parse_file_with_install_dir(path, installation_dir())
+    }
+
+    fn parse_file_with_install_dir(
+        path: &Path,
+        install_dir: Option<PathBuf>,
+    ) -> Result<Vec<Stmt>, Error> {
+        let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let display = canonical.display().to_string();
+        let source = fs::read_to_string(&canonical)
+            .map_err(|error| Error::new(1, format!("cannot read '{display}': {error}")))?;
+        let tokens = lex(&source).map_err(|error| error.with_file(display.clone()))?;
+        let base_dir = canonical
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+
+        let mut parser = Parser {
+            tokens,
+            current: 0,
+            macros: HashMap::new(),
+            macro_depth: 0,
+            current_file: Some(canonical.clone()),
+            base_dir,
+            install_dir,
+            loading: HashSet::from([canonical.clone()]),
+        };
+
+        parser.program().map_err(|error| error.with_file(display))
     }
 
     fn program(&mut self) -> Result<Vec<Stmt>, Error> {
@@ -51,11 +101,50 @@ impl Parser {
         match self.peek().kind.clone() {
             TokenKind::Del => {
                 self.advance();
-                let name = self.consume_identifier("expected a name after 'del'")?;
-                Ok(Stmt {
-                    kind: StmtKind::Delete { name },
-                    line,
-                })
+                let target = self.expression()?;
+
+                let kind = match target {
+                    Expr::Var(name) => StmtKind::Delete { name },
+                    Expr::Index { object, index } => {
+                        let Expr::Var(name) = *object else {
+                            return Err(Error::new(
+                                line,
+                                "only a variable lookup or map/list entry can be deleted",
+                            ));
+                        };
+                        StmtKind::DeleteIndex {
+                            name,
+                            index: *index,
+                        }
+                    }
+                    Expr::Slice {
+                        object,
+                        start,
+                        stop,
+                        step,
+                    } => {
+                        let Expr::Var(name) = *object else {
+                            return Err(Error::new(
+                                line,
+                                "only a variable list can be slice-deleted",
+                            ));
+                        };
+                        StmtKind::DeleteSlice {
+                            name,
+                            start: start.map(|expr| *expr),
+                            stop: stop.map(|expr| *expr),
+                            step: step.map(|expr| *expr),
+                        }
+                    }
+                    _ => {
+                        return Err(Error::new(
+                            line,
+                            "expected a variable, index, or slice after 'del'",
+                        ));
+                    }
+                };
+
+                Ok(Stmt { kind, line })
             }
             TokenKind::Def => {
                 self.advance();
@@ -76,6 +165,10 @@ impl Parser {
             TokenKind::Macro => {
                 self.advance();
                 self.macro_definition(line)
+            }
+            TokenKind::Import => {
+                self.advance();
+                self.import_statement(line)
             }
             TokenKind::Return => {
                 self.advance();
@@ -104,13 +197,29 @@ impl Parser {
             }
             TokenKind::For => {
                 self.advance();
-                let name = self.consume_identifier("expected a loop variable after 'for'")?;
+                let mut names = vec![self.consume_identifier(
+                    "expected a loop variable after 'for'",
+                )?];
+
+                if self.match_kind(&TokenKind::Comma) {
+                    names.push(self.consume_identifier(
+                        "expected a second loop variable after ','",
+                    )?);
+
+                    if self.check(&TokenKind::Comma) {
+                        return Err(Error::new(
+                            line,
+                            "a 'for' loop takes at most two loop variables",
+                        ));
+                    }
+                }
+
                 self.consume(&TokenKind::In, "expected 'in' after the loop variable")?;
                 let iterable = self.expression()?;
                 let body = self.block()?;
                 Ok(Stmt {
                     kind: StmtKind::For {
-                        name,
+                        names,
                         iterable,
                         body,
                     },
@@ -156,6 +265,160 @@ impl Parser {
         }
     }
 
+    fn import_statement(&mut self, line: usize) -> Result<Stmt, Error> {
+        let mut imports = Vec::new();
+
+        loop {
+            let token = self.peek().clone();
+            let raw = match token.kind {
+                TokenKind::Text(path) => {
+                    self.advance();
+                    path
+                }
+                TokenKind::Identifier(name) => {
+                    self.advance();
+                    let mut path = name;
+
+                    // Unquoted module paths may contain `/`: `import lib/math`.
+                    // Anything more exotic should use a quoted path.
+                    while self.match_kind(&TokenKind::Slash) {
+                        let segment = self.consume_identifier(
+                            "expected a module name after '/' in the import path",
+                        )?;
+                        path.push('/');
+                        path.push_str(&segment);
+                    }
+
+                    path
+                }
+                other => {
+                    return Err(Error::new(
+                        token.line,
+                        format!(
+                            "expected a file path or module name after 'import', found {}",
+                            describe(&other)
+                        ),
+                    ));
+                }
+            };
+
+            imports.push(self.load_import(&raw, token.line)?);
+
+            if !self.match_kind(&TokenKind::Comma) {
+                break;
+            }
+            self.skip_newlines();
+        }
+
+        if imports.len() == 1 {
+            Ok(imports.remove(0))
+        } else {
+            Ok(Stmt {
+                kind: StmtKind::Block(imports),
+                line,
+            })
+        }
+    }
+
+    fn load_import(&mut self, raw: &str, line: usize) -> Result<Stmt, Error> {
+        let canonical = self.resolve_import(raw, line)?;
+
+        if self.loading.contains(&canonical) {
+            return Err(Error::new(
+                line,
+                format!("cyclic import of '{}'", canonical.display()),
+            ));
+        }
+
+        let display = canonical.display().to_string();
+        let source = fs::read_to_string(&canonical).map_err(|error| {
+            Error::new(
+                line,
+                format!("cannot import '{}': {error}", canonical.display()),
+            )
+        })?;
+        let tokens = lex(&source).map_err(|error| error.with_file(display.clone()))?;
+        let base_dir = canonical
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+
+        // Parse the imported file with the same macro table, then restore the
+        // importer's tokens and file context. This lets macros defined in an
+        // imported file be used by the file that imports it.
+        let saved_tokens = std::mem::replace(&mut self.tokens, tokens);
+        let saved_current = std::mem::replace(&mut self.current, 0);
+        let saved_file = self.current_file.replace(canonical.clone());
+        let saved_base = std::mem::replace(&mut self.base_dir, base_dir);
+        self.loading.insert(canonical.clone());
+
+        let result = self.program();
+
+        self.loading.remove(&canonical);
+        self.tokens = saved_tokens;
+        self.current = saved_current;
+        self.current_file = saved_file;
+        self.base_dir = saved_base;
+
+        let statements = result.map_err(|error| error.with_file(display.clone()))?;
+
+        Ok(Stmt {
+            kind: StmtKind::SourceFile {
+                file: display,
+                key: canonical.display().to_string(),
+                statements,
+            },
+            line,
+        })
+    }
+
+    fn resolve_import(&self, raw: &str, line: usize) -> Result<PathBuf, Error> {
+        let path = Path::new(raw);
+        let path = if path.extension().is_none() {
+            path.with_extension("dsq")
+        } else {
+            path.to_path_buf()
+        };
+
+        let explicit_relative = raw.starts_with("./")
+            || raw.starts_with("../")
+            || raw.starts_with(".\\")
+            || raw.starts_with("..\\");
+
+        let candidates = if path.is_absolute() {
+            vec![path]
+        } else if explicit_relative {
+            vec![self.base_dir.join(path)]
+        } else {
+            let mut candidates = Vec::new();
+
+            if let Some(install_dir) = &self.install_dir {
+                candidates.push(install_dir.join(&path));
+                candidates.push(install_dir.join("lib").join(&path));
+            }
+
+            candidates.push(self.base_dir.join(&path));
+            candidates
+        };
+
+        for candidate in &candidates {
+            if let Ok(canonical) = fs::canonicalize(candidate) {
+                return Ok(canonical);
+            }
+        }
+
+        let tried = candidates
+            .iter()
+            .map(|candidate| format!("'{}'", candidate.display()))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        Err(Error::new(
+            line,
+            format!("cannot import '{raw}': tried {tried}"),
+        ))
+    }
+
     fn function_statement(&mut self, line: usize) -> Result<Stmt, Error> {
         let name = self.consume_identifier("expected a function name")?;
         let type_params = self.type_parameters()?;
@@ -166,7 +429,7 @@ impl Parser {
         )?;
         let params = self.parameters()?;
         self.check_type_parameters(&type_params, &params, line)?;
-        let body = self.block()?;
+        let body = with_implicit_return(self.block()?);
 
         Ok(Stmt {
             kind: StmtKind::Function {
@@ -276,6 +539,12 @@ impl Parser {
             let param_line = self.peek().line;
             let name = self.consume_identifier("expected a parameter name")?;
 
+            let type_annotation = if self.match_kind(&TokenKind::Colon) {
+                Some(self.consume_identifier("expected a type name after ':'")?)
+            } else {
+                None
+            };
+
             let default = if self.match_kind(&TokenKind::Assign) {
                 Some(self.expression()?)
             } else {
@@ -292,7 +561,11 @@ impl Parser {
             }
             seen_default |= default.is_some();
 
-            params.push(Parameter { name, default });
+            params.push(Parameter {
+                name,
+                type_annotation,
+                default,
+            });
 
             self.skip_newlines();
             if self.match_kind(&TokenKind::Comma) {
@@ -402,7 +675,7 @@ impl Parser {
                 ));
             }
 
-            let body = self.block()?;
+            let body = with_implicit_return(self.block()?);
             methods.push(Method {
                 name: method_name,
                 params,
@@ -459,7 +732,7 @@ impl Parser {
                 || self.next_non_newline_is(&TokenKind::LeftBrace);
             let body = if has_body {
                 self.skip_newlines();
-                Some(self.block()?)
+                Some(with_implicit_return(self.block()?))
             } else {
                 None
             };
@@ -622,6 +895,10 @@ impl Parser {
             current: 0,
             macros: self.macros.clone(),
             macro_depth: self.macro_depth + 1,
+            current_file: self.current_file.clone(),
+            base_dir: self.base_dir.clone(),
+            install_dir: self.install_dir.clone(),
+            loading: self.loading.clone(),
         };
         let statements = parser.program()?;
 
@@ -792,6 +1069,30 @@ impl Parser {
                         line,
                     })
                 }
+                Expr::Slice {
+                    object,
+                    start,
+                    stop,
+                    step,
+                } => {
+                    let Expr::Var(name) = *object else {
+                        return Err(Error::new(
+                            line,
+                            "only a variable list or text can be slice-assigned",
+                        ));
+                    };
+
+                    Ok(Stmt {
+                        kind: StmtKind::SliceAssign {
+                            name,
+                            start: start.map(|expr| *expr),
+                            stop: stop.map(|expr| *expr),
+                            step: step.map(|expr| *expr),
+                            value,
+                        },
+                        line,
+                    })
+                }
                 Expr::Field { object, name: field } => {
                     let Expr::Var(name) = *object else {
                         return Err(Error::new(
@@ -807,7 +1108,7 @@ impl Parser {
                 }
                 _ => Err(Error::new(
                     line,
-                    "only a variable, map entry, or struct field can be assigned to",
+                    "only a variable, index, slice, or struct field can be assigned to",
                 )),
             };
         }
@@ -903,6 +1204,12 @@ impl Parser {
                 BinaryOp::Less
             } else if self.match_kind(&TokenKind::LessEqual) {
                 BinaryOp::LessEqual
+            } else if self.match_kind(&TokenKind::In) {
+                BinaryOp::In
+            } else if self.check(&TokenKind::Not) && self.next_is(&TokenKind::In) {
+                self.advance();
+                self.advance();
+                BinaryOp::NotIn
             } else {
                 break;
             };
@@ -992,13 +1299,59 @@ impl Parser {
         loop {
             if self.match_kind(&TokenKind::LeftBracket) {
                 self.skip_newlines();
-                let index = self.expression()?;
+
+                let start =
+                    if self.check(&TokenKind::Colon) || self.check(&TokenKind::RightBracket) {
+                        None
+                    } else {
+                        Some(Box::new(self.expression()?))
+                    };
+
                 self.skip_newlines();
-                self.consume(&TokenKind::RightBracket, "expected ']' after the index")?;
-                expr = Expr::Index {
-                    object: Box::new(expr),
-                    index: Box::new(index),
-                };
+
+                if self.match_kind(&TokenKind::Colon) {
+                    let stop =
+                        if self.check(&TokenKind::Colon) || self.check(&TokenKind::RightBracket) {
+                            None
+                        } else {
+                            Some(Box::new(self.expression()?))
+                        };
+
+                    self.skip_newlines();
+                    let step = if self.match_kind(&TokenKind::Colon) {
+                        self.skip_newlines();
+                        if self.check(&TokenKind::RightBracket) {
+                            None
+                        } else {
+                            Some(Box::new(self.expression()?))
+                        }
+                    } else {
+                        None
+                    };
+
+                    self.skip_newlines();
+                    self.consume(&TokenKind::RightBracket, "expected ']' after the slice")?;
+                    expr = Expr::Slice {
+                        object: Box::new(expr),
+                        start,
+                        stop,
+                        step,
+                    };
+                } else {
+                    let Some(index) = start else {
+                        return Err(Error::new(
+                            self.peek().line,
+                            "expected an index or slice inside '[]'",
+                        ));
+                    };
+
+                    self.consume(&TokenKind::RightBracket, "expected ']' after the index")?;
+                    expr = Expr::Index {
+                        object: Box::new(expr),
+                        index,
+                    };
+                }
+
                 continue;
             }
 
@@ -1083,6 +1436,10 @@ impl Parser {
                 self.advance();
                 self.map_literal()
             }
+            TokenKind::LeftBracket => {
+                self.advance();
+                self.list_literal()
+            }
             TokenKind::Matrix => {
                 self.advance();
                 self.matrix_literal()
@@ -1124,6 +1481,34 @@ impl Parser {
             "expected ')' to close the argument list",
         )?;
         Ok(args)
+    }
+
+    /// `[1, 2, 3]`, `[]`, and multi-line literals.
+    fn list_literal(&mut self) -> Result<Expr, Error> {
+        self.skip_newlines();
+
+        let mut items: Vec<Expr> = Vec::new();
+        if self.match_kind(&TokenKind::RightBracket) {
+            return Ok(Expr::List(items));
+        }
+
+        loop {
+            items.push(self.expression()?);
+            self.skip_newlines();
+
+            if self.match_kind(&TokenKind::Comma) {
+                self.skip_newlines();
+                if self.match_kind(&TokenKind::RightBracket) {
+                    break;
+                }
+                continue;
+            }
+
+            break;
+        }
+
+        self.consume(&TokenKind::RightBracket, "expected ']' to close the list")?;
+        Ok(Expr::List(items))
     }
 
     fn map_literal(&mut self) -> Result<Expr, Error> {
@@ -1302,6 +1687,12 @@ impl Parser {
     }
 }
 
+fn installation_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|executable| executable.parent().map(Path::to_path_buf))
+}
+
 fn trim_newlines(tokens: &mut Vec<Token>) {
     while matches!(
         tokens.first(),
@@ -1322,6 +1713,21 @@ fn trim_newlines(tokens: &mut Vec<Token>) {
     ) {
         tokens.pop();
     }
+}
+
+/// Make the final bare expression in a function or method body its return
+/// value, so `def double(x) { x * 2 }` works without an explicit `return`.
+fn with_implicit_return(mut statements: Vec<Stmt>) -> Vec<Stmt> {
+    let Some(last) = statements.last_mut() else {
+        return statements;
+    };
+
+    if let StmtKind::Expression(expr) = &mut last.kind {
+        let value = std::mem::replace(expr, Expr::None);
+        last.kind = StmtKind::Return(Some(value));
+    }
+
+    statements
 }
 
 fn describe(kind: &TokenKind) -> String {
@@ -1677,6 +2083,109 @@ mod tests {
         assert!(
             error.message.contains("can only be used as a statement"),
             "{error}"
+        );
+    }
+
+    fn import_test_root(name: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "dsh2_parser_import_{}_{}_{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
+            name
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn imported_file(statements: &[Stmt]) -> PathBuf {
+        let StmtKind::SourceFile { key, .. } = &statements[0].kind else {
+            panic!("expected an imported file");
+        };
+        PathBuf::from(key)
+    }
+
+    #[test]
+    fn imports_search_the_install_dir_before_the_script_dir() {
+        let root = import_test_root("install_first");
+        let install = root.join("install");
+        let project = root.join("project");
+        fs::create_dir_all(&install).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        fs::write(install.join("lib.dsq"), "value = 1").unwrap();
+        fs::write(project.join("lib.dsq"), "value = 2").unwrap();
+        let main = project.join("main.dsq");
+        fs::write(&main, "import lib").unwrap();
+
+        let statements =
+            Parser::parse_file_with_install_dir(&main, Some(install.clone())).unwrap();
+
+        assert_eq!(
+            imported_file(&statements),
+            fs::canonicalize(install.join("lib.dsq")).unwrap()
+        );
+    }
+
+    #[test]
+    fn imports_fall_back_to_the_script_dir() {
+        let root = import_test_root("script_fallback");
+        let install = root.join("install");
+        let project = root.join("project");
+        fs::create_dir_all(&install).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("lib.dsq"), "value = 2").unwrap();
+        let main = project.join("main.dsq");
+        fs::write(&main, "import lib").unwrap();
+
+        let statements =
+            Parser::parse_file_with_install_dir(&main, Some(install)).unwrap();
+
+        assert_eq!(
+            imported_file(&statements),
+            fs::canonicalize(project.join("lib.dsq")).unwrap()
+        );
+    }
+
+    #[test]
+    fn imports_search_the_install_lib_subdirectory() {
+        let root = import_test_root("install_lib");
+        let install = root.join("install");
+        let project = root.join("project");
+        fs::create_dir_all(install.join("lib")).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        fs::write(install.join("lib").join("helper.dsq"), "value = 1").unwrap();
+        let main = project.join("main.dsq");
+        fs::write(&main, "import helper").unwrap();
+
+        let statements =
+            Parser::parse_file_with_install_dir(&main, Some(install.clone())).unwrap();
+
+        assert_eq!(
+            imported_file(&statements),
+            fs::canonicalize(install.join("lib").join("helper.dsq")).unwrap()
+        );
+    }
+
+    #[test]
+    fn explicit_relative_imports_skip_the_install_dir() {
+        let root = import_test_root("explicit_relative");
+        let install = root.join("install");
+        let project = root.join("project");
+        fs::create_dir_all(&install).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        fs::write(install.join("lib.dsq"), "value = 1").unwrap();
+        fs::write(project.join("lib.dsq"), "value = 2").unwrap();
+        let main = project.join("main.dsq");
+        fs::write(&main, "import \"./lib\"").unwrap();
+
+        let statements =
+            Parser::parse_file_with_install_dir(&main, Some(install)).unwrap();
+
+        assert_eq!(
+            imported_file(&statements),
+            fs::canonicalize(project.join("lib.dsq")).unwrap()
         );
     }
 }

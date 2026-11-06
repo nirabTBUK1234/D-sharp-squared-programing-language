@@ -1,8 +1,10 @@
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet},
     error::Error as StdError,
     fs,
     io::{self, BufRead, Write},
+    path::Path,
     rc::Rc,
 };
 
@@ -16,18 +18,24 @@ use crate::value::{SetItem, StructValue, Value};
 const CONSOLE_METHODS: &str = "console.debug, console.print, console.println, console.input, console.clear, console.warn, console.error";
 
 pub fn run_file(path: &str) -> Result<(), Box<dyn StdError>> {
-    let contents = fs::read_to_string(path)?;
-    run(&contents);
+    let mut env = Env::new();
+
+    if let Err(error) = run_file_with_env(&mut env, Path::new(path)) {
+        eprintln!("ERROR: {error}");
+    }
+
     Ok(())
 }
 
-/// Runs a script with a fresh environment, printing the first error it hits.
-pub fn run(source: &str) {
-    let mut env = Env::new();
-
-    if let Err(error) = run_with_env(&mut env, source) {
-        eprintln!("ERROR: {error}");
-    }
+/// Runs a script from disk against an existing environment. Imports resolve
+/// relative to the script's directory, and errors carry the file name.
+pub fn run_file_with_env(env: &mut Env, path: &Path) -> Result<(), Error> {
+    let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let display = canonical.display().to_string();
+    let statements = Parser::parse_file(&canonical)?;
+    Interpreter::with_file(env, Some(display.clone()))
+        .run(&statements)
+        .map_err(|error| error.with_file(display))
 }
 
 /// Parses and runs `source` against an existing environment.
@@ -44,12 +52,17 @@ pub struct Env {
     functions: Vec<HashMap<String, Rc<Function>>>,
     structs: Vec<HashMap<String, StructDef>>,
     traits: Vec<HashMap<String, TraitDef>>,
+    /// Canonical paths of files that have already run. Imports are global to
+    /// the environment, even when their statements appear inside a block.
+    imported: HashSet<String>,
 }
 
 struct Function {
     type_params: Vec<TypeParameter>,
     params: Vec<Parameter>,
     body: Vec<Stmt>,
+    /// File that defined the function, used to label runtime errors.
+    file: Option<String>,
 }
 
 #[derive(Clone)]
@@ -79,6 +92,7 @@ struct TraitDef {
 struct TraitMethodDef {
     params: Vec<Parameter>,
     body: Option<Vec<Stmt>>,
+    file: Option<String>,
 }
 
 impl StructDef {
@@ -97,6 +111,7 @@ impl Env {
             functions: vec![HashMap::new()],
             structs: vec![HashMap::new()],
             traits: vec![HashMap::new()],
+            imported: HashSet::new(),
         }
     }
 
@@ -114,17 +129,31 @@ impl Env {
         self.traits.pop();
     }
 
+    fn is_imported(&self, key: &str) -> bool {
+        self.imported.contains(key)
+    }
+
+    fn mark_imported(&mut self, key: String) {
+        self.imported.insert(key);
+    }
+
+    fn unmark_imported(&mut self, key: &str) {
+        self.imported.remove(key);
+    }
+
     pub fn define_function(
         &mut self,
         name: String,
         type_params: Vec<TypeParameter>,
         params: Vec<Parameter>,
         body: Vec<Stmt>,
+        file: Option<String>,
     ) {
         let function = Rc::new(Function {
             type_params,
             params,
             body,
+            file,
         });
         self.functions
             .last_mut()
@@ -244,20 +273,172 @@ impl Env {
     }
 
     /// `name[key] = value`
-    pub fn assign_index(&mut self, name: &str, key: SetItem, value: Value) -> Result<(), String> {
+    pub fn assign_index(
+        &mut self,
+        name: &str,
+        index: Value,
+        value: Value,
+        line: usize,
+    ) -> Result<(), String> {
         for scope in self.scopes.iter_mut().rev() {
             if let Some(existing) = scope.get_mut(name) {
                 return match existing {
                     Value::Map(entries) => {
+                        let key = map_key(index, line).map_err(|error| error.message)?;
                         entries.insert(key, value);
                         Ok(())
                     }
+                    Value::List(items) => {
+                        let index_type = index.type_name().to_string();
+                        let Value::Int(position) = index else {
+                            return Err(format!(
+                                "list index must be an int, got {index_type}"
+                            ));
+                        };
+
+                        let len = items.borrow().len();
+                        let resolved = resolve_index(position, len).ok_or_else(|| {
+                            format!("list index {position} is out of range (length {len})")
+                        })?;
+                        items.borrow_mut()[resolved] = value;
+                        Ok(())
+                    }
                     other => Err(format!(
-                        "cannot assign to a lookup on '{}': it is a {}, not a hashmap",
+                        "cannot assign to a lookup on '{}': it is a {}, not a hashmap or list",
                         name,
                         other.type_name()
                     )),
                 };
+            }
+        }
+
+        Err(format!("unknown variable '{name}'"))
+    }
+
+    pub fn assign_slice(
+        &mut self,
+        name: &str,
+        value: Value,
+        start: Option<Value>,
+        stop: Option<Value>,
+        step: Option<Value>,
+        line: usize,
+    ) -> Result<(), String> {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(existing) = scope.get_mut(name) {
+                let existing_type = existing.type_name().to_string();
+                let Value::List(items) = existing else {
+                    return Err(format!(
+                        "cannot slice-assign to '{}': it is a {}, not a list",
+                        name, existing_type
+                    ));
+                };
+
+                let new_items = iterate(&value, line).map_err(|error| error.message)?;
+                let len = items.borrow().len();
+                let (start, stop, step) =
+                    normalize_slice(len, start, stop, step, line).map_err(|error| error.message)?;
+                let mut items = items.borrow_mut();
+
+                if step == 1 {
+                    let start = start as usize;
+                    let stop = stop as usize;
+                    items.splice(start..stop, new_items);
+                } else {
+                    let indices = indices_from_parts(start, stop, step);
+                    if indices.len() != new_items.len() {
+                        return Err(format!(
+                            "attempt to assign sequence of size {} to extended slice of size {}",
+                            new_items.len(),
+                            indices.len()
+                        ));
+                    }
+
+                    for (index, item) in indices.into_iter().zip(new_items) {
+                        items[index] = item;
+                    }
+                }
+
+                return Ok(());
+            }
+        }
+
+        Err(format!("unknown variable '{name}'"))
+    }
+
+    pub fn delete_index(&mut self, name: &str, index: Value, line: usize) -> Result<(), String> {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(existing) = scope.get_mut(name) {
+                return match existing {
+                    Value::Map(entries) => {
+                        let key = map_key(index, line).map_err(|error| error.message)?;
+                        if entries.remove(&key).is_some() {
+                            Ok(())
+                        } else {
+                            Err(format!("hashmap key {key} not found"))
+                        }
+                    }
+                    Value::List(items) => {
+                        let index_type = index.type_name().to_string();
+                        let Value::Int(position) = index else {
+                            return Err(format!(
+                                "list index must be an int, got {index_type}"
+                            ));
+                        };
+
+                        let len = items.borrow().len();
+                        let resolved = resolve_index(position, len).ok_or_else(|| {
+                            format!("list index {position} is out of range (length {len})")
+                        })?;
+                        items.borrow_mut().remove(resolved);
+                        Ok(())
+                    }
+                    other => Err(format!(
+                        "cannot delete a lookup on '{}': it is a {}, not a hashmap or list",
+                        name,
+                        other.type_name()
+                    )),
+                };
+            }
+        }
+
+        Err(format!("unknown variable '{name}'"))
+    }
+
+    pub fn delete_slice(
+        &mut self,
+        name: &str,
+        start: Option<Value>,
+        stop: Option<Value>,
+        step: Option<Value>,
+        line: usize,
+    ) -> Result<(), String> {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(existing) = scope.get_mut(name) {
+                let existing_type = existing.type_name().to_string();
+                let Value::List(items) = existing else {
+                    return Err(format!(
+                        "cannot slice-delete from '{}': it is a {}, not a list",
+                        name, existing_type
+                    ));
+                };
+
+                let len = items.borrow().len();
+                let (start, stop, step) =
+                    normalize_slice(len, start, stop, step, line).map_err(|error| error.message)?;
+                let mut items = items.borrow_mut();
+
+                if step == 1 {
+                    items.drain(start as usize..stop as usize);
+                } else {
+                    let mut indices = indices_from_parts(start, stop, step);
+                    indices.sort_unstable();
+                    for index in indices.into_iter().rev() {
+                        items.remove(index);
+                    }
+                }
+
+                return Ok(());
             }
         }
 
@@ -304,6 +485,7 @@ struct Interpreter<'a> {
     env: &'a mut Env,
     loop_depth: usize,
     function_depth: usize,
+    current_file: Option<String>,
 }
 
 impl<'a> Interpreter<'a> {
@@ -312,6 +494,16 @@ impl<'a> Interpreter<'a> {
             env,
             loop_depth: 0,
             function_depth: 0,
+            current_file: None,
+        }
+    }
+
+    fn with_file(env: &'a mut Env, file: Option<String>) -> Self {
+        Interpreter {
+            env,
+            loop_depth: 0,
+            function_depth: 0,
+            current_file: file,
         }
     }
 
@@ -343,9 +535,33 @@ impl<'a> Interpreter<'a> {
             StmtKind::IndexAssign { name, index, value } => {
                 let value = self.eval(value, line)?;
                 let index = self.eval(index, line)?;
-                let key = map_key(index, line)?;
                 self.env
-                    .assign_index(name, key, value)
+                    .assign_index(name, index, value, line)
+                    .map_err(|message| Error::new(line, message))?;
+                Ok(Flow::Normal)
+            }
+            StmtKind::SliceAssign {
+                name,
+                start,
+                stop,
+                step,
+                value,
+            } => {
+                let value = self.eval(value, line)?;
+                let start = start
+                    .as_ref()
+                    .map(|expr| self.eval(expr, line))
+                    .transpose()?;
+                let stop = stop
+                    .as_ref()
+                    .map(|expr| self.eval(expr, line))
+                    .transpose()?;
+                let step = step
+                    .as_ref()
+                    .map(|expr| self.eval(expr, line))
+                    .transpose()?;
+                self.env
+                    .assign_slice(name, value, start, stop, step, line)
                     .map_err(|message| Error::new(line, message))?;
                 Ok(Flow::Normal)
             }
@@ -384,6 +600,7 @@ impl<'a> Interpreter<'a> {
                         TraitMethodDef {
                             params: method.params.clone(),
                             body: method.body.clone(),
+                            file: self.current_file.clone(),
                         },
                     );
                 }
@@ -403,6 +620,7 @@ impl<'a> Interpreter<'a> {
                                 type_params: Vec::new(),
                                 params: method.params.clone(),
                                 body: method.body.clone(),
+                                file: self.current_file.clone(),
                             });
                             self.env
                                 .add_method(name, method.name.clone(), function)
@@ -422,6 +640,36 @@ impl<'a> Interpreter<'a> {
                     .map_err(|message| Error::new(line, message))?;
                 Ok(Flow::Normal)
             }
+            StmtKind::DeleteIndex { name, index } => {
+                let index = self.eval(index, line)?;
+                self.env
+                    .delete_index(name, index, line)
+                    .map_err(|message| Error::new(line, message))?;
+                Ok(Flow::Normal)
+            }
+            StmtKind::DeleteSlice {
+                name,
+                start,
+                stop,
+                step,
+            } => {
+                let start = start
+                    .as_ref()
+                    .map(|expr| self.eval(expr, line))
+                    .transpose()?;
+                let stop = stop
+                    .as_ref()
+                    .map(|expr| self.eval(expr, line))
+                    .transpose()?;
+                let step = step
+                    .as_ref()
+                    .map(|expr| self.eval(expr, line))
+                    .transpose()?;
+                self.env
+                    .delete_slice(name, start, stop, step, line)
+                    .map_err(|message| Error::new(line, message))?;
+                Ok(Flow::Normal)
+            }
             StmtKind::Function {
                 name,
                 type_params,
@@ -433,6 +681,7 @@ impl<'a> Interpreter<'a> {
                     type_params.clone(),
                     params.clone(),
                     body.clone(),
+                    self.current_file.clone(),
                 );
                 Ok(Flow::Normal)
             }
@@ -482,15 +731,24 @@ impl<'a> Interpreter<'a> {
                 Ok(Flow::Normal)
             }
             StmtKind::For {
-                name,
+                names,
                 iterable,
                 body,
             } => {
                 let iterable = self.eval(iterable, line)?;
-                let items = iterate(&iterable, line)?;
+                let rows: Vec<Vec<Value>> = if names.len() == 1 {
+                    iterate(&iterable, line)?
+                        .into_iter()
+                        .map(|item| vec![item])
+                        .collect()
+                } else {
+                    iterate_pairs(&iterable, line)?
+                };
 
-                for item in items {
-                    self.env.assign(name, item);
+                for row in rows {
+                    for (name, value) in names.iter().zip(row) {
+                        self.env.assign(name, value);
+                    }
 
                     match self.exec_loop_body(body)? {
                         Flow::Break => break,
@@ -514,6 +772,29 @@ impl<'a> Interpreter<'a> {
                 Ok(Flow::Continue)
             }
             StmtKind::Block(statements) => self.exec_statements(statements),
+            StmtKind::SourceFile {
+                file,
+                key,
+                statements,
+            } => {
+                if self.env.is_imported(key) {
+                    return Ok(Flow::Normal);
+                }
+
+                // Mark before running so a dynamically recursive import cannot
+                // loop forever. A failed import is unmarked so the REPL can
+                // retry it after the file is fixed.
+                self.env.mark_imported(key.clone());
+                let saved_file = self.current_file.replace(file.clone());
+                let result = self.exec_statements(statements);
+                self.current_file = saved_file;
+
+                if result.is_err() {
+                    self.env.unmark_imported(key);
+                }
+
+                result.map_err(|error| error.with_file(file.clone()))
+            }
             StmtKind::Expression(expr) => {
                 self.eval(expr, line)?;
                 Ok(Flow::Normal)
@@ -550,6 +831,13 @@ impl<'a> Interpreter<'a> {
                 .env
                 .get_value(name)
                 .map_err(|message| Error::new(line, message)),
+            Expr::List(items) => {
+                let mut values = Vec::with_capacity(items.len());
+                for item in items {
+                    values.push(self.eval(item, line)?);
+                }
+                Ok(Value::list(values))
+            }
             Expr::Map(entries) => {
                 let mut map = HashMap::new();
 
@@ -580,6 +868,27 @@ impl<'a> Interpreter<'a> {
                 let object = self.eval(object, line)?;
                 let index = self.eval(index, line)?;
                 index_value(object, index, line)
+            }
+            Expr::Slice {
+                object,
+                start,
+                stop,
+                step,
+            } => {
+                let object = self.eval(object, line)?;
+                let start = start
+                    .as_ref()
+                    .map(|expr| self.eval(expr, line))
+                    .transpose()?;
+                let stop = stop
+                    .as_ref()
+                    .map(|expr| self.eval(expr, line))
+                    .transpose()?;
+                let step = step
+                    .as_ref()
+                    .map(|expr| self.eval(expr, line))
+                    .transpose()?;
+                slice_value(object, start, stop, step, line)
             }
             Expr::Field { object, name } => {
                 let object = self.eval(object, line)?;
@@ -682,6 +991,34 @@ impl<'a> Interpreter<'a> {
         }
 
         match name {
+            "list" | "List" => {
+                if values.is_empty() {
+                    Ok(Value::list(Vec::new()))
+                } else if values.len() == 1 {
+                    Ok(Value::list(iterate(&values[0], line)?))
+                } else {
+                    Err(Error::new(
+                        line,
+                        format!("list() takes at most 1 argument, but {} given", values.len()),
+                    ))
+                }
+            }
+            "len" => {
+                if values.len() != 1 {
+                    return Err(Error::new(
+                        line,
+                        format!("len() takes 1 argument, but {} given", values.len()),
+                    ));
+                }
+
+                let length = length_of(&values[0]).ok_or_else(|| {
+                    Error::new(
+                        line,
+                        format!("len() does not support {}", values[0].type_name()),
+                    )
+                })?;
+                Ok(Value::Int(length as i64))
+            }
             "hashSet" | "hashset" | "set" => {
                 let mut items = HashSet::new();
 
@@ -734,13 +1071,17 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Value, Error> {
         let receiver_type = receiver.type_name().to_string();
 
-        let Value::Struct(struct_value) = receiver else {
-            return Err(Error::new(
-                line,
-                format!(
-                    "cannot call method '{method}' on a {receiver_type} (only structs have methods)"
-                ),
-            ));
+        let struct_value = match receiver {
+            Value::List(items) => return list_method(items, method, values, line),
+            Value::Struct(struct_value) => struct_value,
+            _ => {
+                return Err(Error::new(
+                    line,
+                    format!(
+                        "cannot call method '{method}' on a {receiver_type} (only lists and structs have methods)"
+                    ),
+                ));
+            }
         };
 
         let definition = self
@@ -826,6 +1167,7 @@ impl<'a> Interpreter<'a> {
                     type_params: Vec::new(),
                     params: method.params.clone(),
                     body: method.body.clone(),
+                    file: self.current_file.clone(),
                 }),
             );
         }
@@ -843,6 +1185,7 @@ impl<'a> Interpreter<'a> {
                         type_params: Vec::new(),
                         params: trait_method.params.clone(),
                         body: body.clone(),
+                        file: trait_method.file.clone(),
                     }),
                 ));
             } else {
@@ -969,7 +1312,9 @@ impl<'a> Interpreter<'a> {
 
         self.env.push_scope();
 
-        let result = match self.bind_parameters(function, values, line) {
+        let saved_file = std::mem::replace(&mut self.current_file, function.file.clone());
+
+        let result = match self.bind_parameters(function, values, label, line) {
             Ok(()) => {
                 if let Err(error) = self.check_type_bounds(function, label, line) {
                     Err(error)
@@ -982,17 +1327,25 @@ impl<'a> Interpreter<'a> {
                     self.loop_depth = loop_depth;
                     self.function_depth -= 1;
 
-                    match flow? {
-                        Flow::Return(value) => Ok(value),
-                        Flow::Normal => Ok(Value::None),
-                        Flow::Break | Flow::Continue => Err(Error::new(
+                    match flow {
+                        Ok(Flow::Return(value)) => Ok(value),
+                        Ok(Flow::Normal) => Ok(Value::None),
+                        Ok(Flow::Break | Flow::Continue) => Err(Error::new(
                             line,
                             "'break' or 'continue' escaped a function body",
                         )),
+                        Err(error) => Err(error),
                     }
                 }
             }
             Err(error) => Err(error),
+        };
+
+        self.current_file = saved_file;
+
+        let result = match &function.file {
+            Some(file) => result.map_err(|error| error.with_file(file.clone())),
+            None => result,
         };
 
         let final_self = self.env.get_value("self").ok();
@@ -1071,6 +1424,7 @@ impl<'a> Interpreter<'a> {
         &mut self,
         function: &Function,
         values: Vec<Value>,
+        label: &str,
         line: usize,
     ) -> Result<(), Error> {
         let mut values = values.into_iter();
@@ -1089,10 +1443,314 @@ impl<'a> Interpreter<'a> {
                 },
             };
 
+            self.check_parameter_type(function, param, &value, label, line)?;
             self.env.define(param.name.clone(), value);
         }
 
         Ok(())
+    }
+
+    fn check_parameter_type(
+        &self,
+        function: &Function,
+        param: &Parameter,
+        value: &Value,
+        label: &str,
+        line: usize,
+    ) -> Result<(), Error> {
+        let Some(annotation) = &param.type_annotation else {
+            return Ok(());
+        };
+
+        // A type parameter used as an annotation, as in `def f<T>(value: T)`,
+        // accepts any value unless the type parameter has a trait bound.
+        if let Some(type_param) = function
+            .type_params
+            .iter()
+            .find(|type_param| type_param.name == *annotation)
+        {
+            let accepted = match &type_param.bound {
+                None => true,
+                Some(bound) => match value {
+                    Value::Struct(struct_value) => self
+                        .env
+                        .get_struct(&struct_value.type_name)
+                        .is_some_and(|definition| definition.traits.contains(bound)),
+                    _ => false,
+                },
+            };
+
+            return if accepted {
+                Ok(())
+            } else {
+                Err(Error::new(
+                    line,
+                    format!(
+                        "argument '{}' to {label} must implement trait '{}'",
+                        param.name,
+                        type_param.bound.as_deref().unwrap_or("")
+                    ),
+                ))
+            };
+        }
+
+        let normalized = annotation.to_ascii_lowercase();
+        let accepted = match normalized.as_str() {
+            "any" => true,
+            "int" => matches!(value, Value::Int(_)),
+            "float" => matches!(value, Value::Float(_)),
+            "number" => matches!(value, Value::Int(_) | Value::Float(_)),
+            "bool" => matches!(value, Value::Bool(_)),
+            "text" | "string" => matches!(value, Value::Text(_)),
+            "none" => matches!(value, Value::None),
+            "list" => matches!(value, Value::List(_)),
+            "hashset" | "set" => matches!(value, Value::HashSet(_)),
+            "hashmap" | "map" => matches!(value, Value::Map(_)),
+            "matrix" | "mat" => matches!(value, Value::Matrix(_)),
+            _ => {
+                let expected = annotation.as_str();
+                if self.env.get_trait(expected).is_some() {
+                    match value {
+                        Value::Struct(struct_value) => self
+                            .env
+                            .get_struct(&struct_value.type_name)
+                            .is_some_and(|definition| definition.traits.contains(expected)),
+                        _ => false,
+                    }
+                } else if self.env.get_struct(expected).is_some() {
+                    matches!(value, Value::Struct(struct_value) if struct_value.type_name == expected)
+                } else {
+                    return Err(Error::new(
+                        line,
+                        format!(
+                            "unknown type annotation '{}' on parameter '{}'",
+                            expected, param.name
+                        ),
+                    ));
+                }
+            }
+        };
+
+        if accepted {
+            Ok(())
+        } else {
+            Err(Error::new(
+                line,
+                format!(
+                    "argument '{}' to {label} must be {annotation}, got {}",
+                    param.name,
+                    value.type_name()
+                ),
+            ))
+        }
+    }
+}
+
+fn list_method(
+    items: Rc<RefCell<Vec<Value>>>,
+    method: &str,
+    args: Vec<Value>,
+    line: usize,
+) -> Result<Value, Error> {
+    match method {
+        "append" => {
+            expect_arity("list.append", &args, 1, line)?;
+            items.borrow_mut().push(args[0].clone());
+            Ok(Value::None)
+        }
+        "extend" => {
+            expect_arity("list.extend", &args, 1, line)?;
+            let new_items = iterate(&args[0], line)?;
+            items.borrow_mut().extend(new_items);
+            Ok(Value::None)
+        }
+        "insert" => {
+            expect_arity("list.insert", &args, 2, line)?;
+            let index = int_arg("list.insert", &args[0], line)?;
+            let len = items.borrow().len();
+            let index = clamp_insert_index(index, len);
+            items.borrow_mut().insert(index, args[1].clone());
+            Ok(Value::None)
+        }
+        "remove" => {
+            expect_arity("list.remove", &args, 1, line)?;
+            let mut items = items.borrow_mut();
+            let Some(index) = items
+                .iter()
+                .position(|item| equal(item, &args[0]))
+            else {
+                return Err(Error::new(
+                    line,
+                    format!("list.remove(x): {} is not in the list", args[0]),
+                ));
+            };
+            items.remove(index);
+            Ok(Value::None)
+        }
+        "pop" => {
+            let index = if args.is_empty() {
+                None
+            } else if args.len() == 1 {
+                Some(int_arg("list.pop", &args[0], line)?)
+            } else {
+                return Err(Error::new(
+                    line,
+                    format!("list.pop() takes at most 1 argument, but {} given", args.len()),
+                ));
+            };
+
+            let mut items = items.borrow_mut();
+            if items.is_empty() {
+                return Err(Error::new(line, "pop from empty list"));
+            }
+
+            let position = match index {
+                Some(index) => resolve_index(index, items.len()).ok_or_else(|| {
+                    Error::new(
+                        line,
+                        format!(
+                            "list.pop() index {index} is out of range (length {})",
+                            items.len()
+                        ),
+                    )
+                })?,
+                None => items.len() - 1,
+            };
+
+            Ok(items.remove(position))
+        }
+        "clear" => {
+            expect_arity("list.clear", &args, 0, line)?;
+            items.borrow_mut().clear();
+            Ok(Value::None)
+        }
+        "copy" => {
+            expect_arity("list.copy", &args, 0, line)?;
+            Ok(Value::list(items.borrow().clone()))
+        }
+        "index" => {
+            expect_arity("list.index", &args, 1, line)?;
+            let items = items.borrow();
+            let Some(index) = items.iter().position(|item| equal(item, &args[0])) else {
+                return Err(Error::new(
+                    line,
+                    format!("list.index(x): {} is not in the list", args[0]),
+                ));
+            };
+            Ok(Value::Int(index as i64))
+        }
+        "count" => {
+            expect_arity("list.count", &args, 1, line)?;
+            let count = items
+                .borrow()
+                .iter()
+                .filter(|item| equal(item, &args[0]))
+                .count();
+            Ok(Value::Int(count as i64))
+        }
+        "reverse" => {
+            expect_arity("list.reverse", &args, 0, line)?;
+            items.borrow_mut().reverse();
+            Ok(Value::None)
+        }
+        "sort" => {
+            expect_arity("list.sort", &args, 0, line)?;
+            sort_list(&mut items.borrow_mut(), line)?;
+            Ok(Value::None)
+        }
+        _ => Err(Error::new(
+            line,
+            format!(
+                "unknown list method '{method}' (available: append, clear, copy, count, extend, index, insert, pop, remove, reverse, sort)"
+            ),
+        )),
+    }
+}
+
+fn expect_arity(label: &str, args: &[Value], expected: usize, line: usize) -> Result<(), Error> {
+    if args.len() != expected {
+        return Err(Error::new(
+            line,
+            format!(
+                "{label}() takes {expected} argument(s), but {} given",
+                args.len()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn int_arg(label: &str, value: &Value, line: usize) -> Result<i64, Error> {
+    match value {
+        Value::Int(number) => Ok(*number),
+        other => Err(Error::new(
+            line,
+            format!("{label}() index must be an int, got {}", other.type_name()),
+        )),
+    }
+}
+
+fn clamp_insert_index(index: i64, len: usize) -> usize {
+    let len = len as i64;
+    let index = if index < 0 { index + len } else { index };
+    index.clamp(0, len) as usize
+}
+
+fn sort_list(items: &mut [Value], line: usize) -> Result<(), Error> {
+    if items.len() < 2 {
+        return Ok(());
+    }
+
+    if items
+        .iter()
+        .all(|value| matches!(value, Value::Int(_) | Value::Float(_)))
+    {
+        items.sort_by(|left, right| {
+            number_value(left)
+                .partial_cmp(&number_value(right))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        return Ok(());
+    }
+
+    if items.iter().all(|value| matches!(value, Value::Text(_))) {
+        items.sort_by(|left, right| match (left, right) {
+            (Value::Text(left), Value::Text(right)) => left.cmp(right),
+            _ => unreachable!("checked that all items are text"),
+        });
+        return Ok(());
+    }
+
+    if items.iter().all(|value| matches!(value, Value::Bool(_))) {
+        items.sort_by_key(|value| match value {
+            Value::Bool(value) => *value,
+            _ => unreachable!("checked that all items are bools"),
+        });
+        return Ok(());
+    }
+
+    Err(Error::new(
+        line,
+        "list.sort() only supports lists of numbers, text, or bools",
+    ))
+}
+
+fn number_value(value: &Value) -> f64 {
+    match value {
+        Value::Int(number) => *number as f64,
+        Value::Float(number) => *number,
+        _ => f64::NAN,
+    }
+}
+
+fn length_of(value: &Value) -> Option<usize> {
+    match value {
+        Value::List(items) => Some(items.borrow().len()),
+        Value::Text(text) => Some(text.chars().count()),
+        Value::HashSet(items) => Some(items.len()),
+        Value::Map(entries) => Some(entries.len()),
+        Value::Matrix(rows) => Some(rows.len()),
+        _ => None,
     }
 }
 
@@ -1217,6 +1875,8 @@ fn binary_op(op: BinaryOp, left: Value, right: Value, line: usize) -> Result<Val
         BinaryOp::Greater | BinaryOp::GreaterEqual | BinaryOp::Less | BinaryOp::LessEqual => {
             compare(op, &left, &right, line)
         }
+        BinaryOp::In => Ok(Value::Bool(membership(&left, &right, line)?)),
+        BinaryOp::NotIn => Ok(Value::Bool(!membership(&left, &right, line)?)),
         BinaryOp::Add => add(left, right, line),
         BinaryOp::Subtract | BinaryOp::Multiply | BinaryOp::Divide | BinaryOp::Remainder => {
             arithmetic(op, left, right, line)
@@ -1234,6 +1894,34 @@ fn equal(left: &Value, right: &Value) -> bool {
     }
 }
 
+fn membership(value: &Value, container: &Value, line: usize) -> Result<bool, Error> {
+    match container {
+        Value::List(items) => Ok(items.borrow().iter().any(|item| equal(item, value))),
+        Value::Text(text) => match value {
+            Value::Text(needle) => Ok(text.contains(needle)),
+            other => Err(Error::new(
+                line,
+                format!(
+                    "text membership needs text on the left, got {}",
+                    other.type_name()
+                ),
+            )),
+        },
+        Value::HashSet(items) => Ok(SetItem::from_value(value.clone())
+            .is_ok_and(|item| items.contains(&item))),
+        Value::Map(entries) => Ok(SetItem::from_value(value.clone())
+            .is_ok_and(|key| entries.contains_key(&key))),
+        Value::Matrix(rows) => match value {
+            Value::Text(row) => Ok(rows.contains_key(row)),
+            _ => Ok(false),
+        },
+        other => Err(Error::new(
+            line,
+            format!("cannot check membership in a {}", other.type_name()),
+        )),
+    }
+}
+
 fn add(left: Value, right: Value, line: usize) -> Result<Value, Error> {
     match (&left, &right) {
         (Value::Int(a), Value::Int(b)) => a
@@ -1241,6 +1929,11 @@ fn add(left: Value, right: Value, line: usize) -> Result<Value, Error> {
             .map(Value::Int)
             .ok_or_else(|| Error::new(line, "integer overflow")),
         (Value::Text(a), Value::Text(b)) => Ok(Value::Text(format!("{a}{b}"))),
+        (Value::List(a), Value::List(b)) => {
+            let mut items = a.borrow().clone();
+            items.extend(b.borrow().iter().cloned());
+            Ok(Value::list(items))
+        }
         _ => match float_pair(&left, &right) {
             Some((a, b)) => Ok(Value::Float(a + b)),
             None => Err(type_error("add", &left, &right, line)),
@@ -1248,7 +1941,31 @@ fn add(left: Value, right: Value, line: usize) -> Result<Value, Error> {
     }
 }
 
+fn repeat_list(items: &Rc<RefCell<Vec<Value>>>, count: i64) -> Result<Value, Error> {
+    if count <= 0 {
+        return Ok(Value::list(Vec::new()));
+    }
+
+    let source = items.borrow();
+    let mut result = Vec::with_capacity(source.len().saturating_mul(count as usize));
+
+    for _ in 0..count {
+        result.extend(source.iter().cloned());
+    }
+
+    Ok(Value::list(result))
+}
+
 fn arithmetic(op: BinaryOp, left: Value, right: Value, line: usize) -> Result<Value, Error> {
+    if op == BinaryOp::Multiply {
+        if let (Value::List(items), Value::Int(count)) = (&left, &right) {
+            return repeat_list(items, *count);
+        }
+        if let (Value::Int(count), Value::List(items)) = (&left, &right) {
+            return repeat_list(items, *count);
+        }
+    }
+
     if let (Value::Int(a), Value::Int(b)) = (&left, &right) {
         let (a, b) = (*a, *b);
 
@@ -1362,6 +2079,7 @@ fn type_error(action: &str, left: &Value, right: &Value, line: usize) -> Error {
 
 fn iterate(value: &Value, line: usize) -> Result<Vec<Value>, Error> {
     match value {
+        Value::List(items) => Ok(items.borrow().clone()),
         Value::HashSet(items) => Ok(items.iter().map(set_item_to_value).collect()),
         Value::Map(entries) => {
             let mut keys: Vec<&SetItem> = entries.keys().collect();
@@ -1377,7 +2095,32 @@ fn iterate(value: &Value, line: usize) -> Result<Vec<Value>, Error> {
         other => Err(Error::new(
             line,
             format!(
-                "cannot loop over a {} (use a hashset, hashmap, matrix, or text)",
+                "cannot loop over a {} (use a list, hashset, hashmap, matrix, or text)",
+                other.type_name()
+            ),
+        )),
+    }
+}
+
+fn iterate_pairs(value: &Value, line: usize) -> Result<Vec<Vec<Value>>, Error> {
+    match value {
+        Value::Map(entries) => {
+            let mut keys: Vec<&SetItem> = entries.keys().collect();
+            keys.sort_by_key(|key| key.to_string());
+            Ok(keys
+                .into_iter()
+                .map(|key| {
+                    vec![
+                        set_item_to_value(key),
+                        entries.get(key).cloned().unwrap_or(Value::None),
+                    ]
+                })
+                .collect())
+        }
+        other => Err(Error::new(
+            line,
+            format!(
+                "two-variable 'for' loops need a hashmap, got {}",
                 other.type_name()
             ),
         )),
@@ -1405,6 +2148,21 @@ fn map_key(value: Value, line: usize) -> Result<SetItem, Error> {
     }
 }
 
+fn resolve_index(position: i64, len: usize) -> Option<usize> {
+    let len = len as i64;
+    let resolved = if position < 0 {
+        len + position
+    } else {
+        position
+    };
+
+    if resolved < 0 || resolved >= len {
+        None
+    } else {
+        Some(resolved as usize)
+    }
+}
+
 fn index_value(object: Value, index: Value, line: usize) -> Result<Value, Error> {
     match object {
         Value::Map(entries) => {
@@ -1413,6 +2171,27 @@ fn index_value(object: Value, index: Value, line: usize) -> Result<Value, Error>
                 .get(&key)
                 .cloned()
                 .ok_or_else(|| Error::new(line, format!("hashmap key {key} not found")))
+        }
+        Value::List(items) => {
+            let type_name = index.type_name().to_string();
+            let Value::Int(position) = index else {
+                return Err(Error::new(
+                    line,
+                    format!("list index must be an int, got {type_name}"),
+                ));
+            };
+
+            let items = items.borrow();
+            let resolved = resolve_index(position, items.len()).ok_or_else(|| {
+                Error::new(
+                    line,
+                    format!(
+                        "list index {position} is out of range (length {})",
+                        items.len()
+                    ),
+                )
+            })?;
+            Ok(items[resolved].clone())
         }
         Value::Text(text) => {
             let type_name = index.type_name().to_string();
@@ -1424,32 +2203,138 @@ fn index_value(object: Value, index: Value, line: usize) -> Result<Value, Error>
             };
 
             let chars: Vec<char> = text.chars().collect();
-            let resolved = if position < 0 {
-                chars.len() as i64 + position
-            } else {
-                position
-            };
-
-            if resolved < 0 || resolved as usize >= chars.len() {
-                return Err(Error::new(
+            let resolved = resolve_index(position, chars.len()).ok_or_else(|| {
+                Error::new(
                     line,
                     format!(
                         "text index {position} is out of range (length {})",
                         chars.len()
                     ),
-                ));
-            }
-
-            Ok(Value::Text(chars[resolved as usize].to_string()))
+                )
+            })?;
+            Ok(Value::Text(chars[resolved].to_string()))
         }
         other => Err(Error::new(
             line,
             format!(
-                "cannot index a {} (only hashmap and text support [ ])",
+                "cannot index a {} (only hashmap, list, and text support [ ])",
                 other.type_name()
             ),
         )),
     }
+}
+
+fn slice_value(
+    object: Value,
+    start: Option<Value>,
+    stop: Option<Value>,
+    step: Option<Value>,
+    line: usize,
+) -> Result<Value, Error> {
+    match object {
+        Value::List(items) => {
+            let items = items.borrow();
+            let (start, stop, step) = normalize_slice(items.len(), start, stop, step, line)?;
+            let result = indices_from_parts(start, stop, step)
+                .into_iter()
+                .map(|index| items[index].clone())
+                .collect();
+            Ok(Value::list(result))
+        }
+        Value::Text(text) => {
+            let chars: Vec<char> = text.chars().collect();
+            let (start, stop, step) = normalize_slice(chars.len(), start, stop, step, line)?;
+            let result = indices_from_parts(start, stop, step)
+                .into_iter()
+                .map(|index| chars[index])
+                .collect();
+            Ok(Value::Text(result))
+        }
+        other => Err(Error::new(
+            line,
+            format!("cannot slice a {}", other.type_name()),
+        )),
+    }
+}
+
+fn normalize_slice(
+    len: usize,
+    start: Option<Value>,
+    stop: Option<Value>,
+    step: Option<Value>,
+    line: usize,
+) -> Result<(i64, i64, i64), Error> {
+    let len = len as i64;
+    let step = match step {
+        None => 1,
+        Some(Value::Int(step)) => step,
+        Some(other) => {
+            return Err(Error::new(
+                line,
+                format!("slice step must be an int, got {}", other.type_name()),
+            ));
+        }
+    };
+
+    if step == 0 {
+        return Err(Error::new(line, "slice step cannot be zero"));
+    }
+
+    let parse_bound = |value: Option<Value>, label: &str| -> Result<Option<i64>, Error> {
+        match value {
+            None => Ok(None),
+            Some(Value::Int(value)) => Ok(Some(value)),
+            Some(other) => Err(Error::new(
+                line,
+                format!("slice {label} must be an int, got {}", other.type_name()),
+            )),
+        }
+    };
+
+    let start = parse_bound(start, "start")?;
+    let stop = parse_bound(stop, "stop")?;
+
+    if step > 0 {
+        Ok((
+            start.map_or(0, |index| clamp_slice_positive(index, len)),
+            stop.map_or(len, |index| clamp_slice_positive(index, len)),
+            step,
+        ))
+    } else {
+        Ok((
+            start.map_or(len - 1, |index| clamp_slice_negative(index, len)),
+            stop.map_or(-1, |index| clamp_slice_negative(index, len)),
+            step,
+        ))
+    }
+}
+
+fn clamp_slice_positive(index: i64, len: i64) -> i64 {
+    let index = if index < 0 { index + len } else { index };
+    index.clamp(0, len)
+}
+
+fn clamp_slice_negative(index: i64, len: i64) -> i64 {
+    let index = if index < 0 { index + len } else { index };
+    index.clamp(-1, len - 1)
+}
+
+fn indices_from_parts(mut start: i64, stop: i64, step: i64) -> Vec<usize> {
+    let mut indices = Vec::new();
+
+    if step > 0 {
+        while start < stop {
+            indices.push(start as usize);
+            start += step;
+        }
+    } else {
+        while start > stop {
+            indices.push(start as usize);
+            start += step;
+        }
+    }
+
+    indices
 }
 
 pub fn run_prompt() -> Result<(), String> {
@@ -1552,6 +2437,8 @@ fn read_repl_line() -> Result<Option<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn env_after(source: &str) -> Env {
         let mut env = Env::new();
@@ -1562,6 +2449,19 @@ mod tests {
     fn error_of(source: &str) -> Error {
         let mut env = Env::new();
         run_with_env(&mut env, source).unwrap_err()
+    }
+
+    fn temp_project(name: &str) -> (PathBuf, PathBuf) {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let directory = std::env::temp_dir().join(format!(
+            "dsh2_import_{}_{}_{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
+            name
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let main = directory.join("main.dsq");
+        (directory, main)
     }
 
     #[test]
@@ -1819,6 +2719,217 @@ mod tests {
     }
 
     #[test]
+    fn lists_support_literals_indexing_slicing_and_display() {
+        let env = env_after(
+            "a = [1, 2, 3]\n\
+             first = a[0]\n\
+             last = a[-1]\n\
+             middle = a[1:3]\n\
+             reversed = a[::-1]\n\
+             stepped = a[::2]\n\
+             from_start = a[1:]\n\
+             to_stop = a[:2]\n\
+             empty = []\n\
+             mixed = [1, \"two\", [3]]",
+        );
+
+        assert_eq!(env.get_value("a").unwrap().to_string(), "[1, 2, 3]");
+        assert_eq!(env.get_value("first").unwrap(), Value::Int(1));
+        assert_eq!(env.get_value("last").unwrap(), Value::Int(3));
+        assert_eq!(
+            env.get_value("middle").unwrap(),
+            Value::list(vec![Value::Int(2), Value::Int(3)])
+        );
+        assert_eq!(
+            env.get_value("reversed").unwrap(),
+            Value::list(vec![Value::Int(3), Value::Int(2), Value::Int(1)])
+        );
+        assert_eq!(
+            env.get_value("stepped").unwrap(),
+            Value::list(vec![Value::Int(1), Value::Int(3)])
+        );
+        assert_eq!(
+            env.get_value("from_start").unwrap(),
+            Value::list(vec![Value::Int(2), Value::Int(3)])
+        );
+        assert_eq!(
+            env.get_value("to_stop").unwrap(),
+            Value::list(vec![Value::Int(1), Value::Int(2)])
+        );
+        assert_eq!(env.get_value("empty").unwrap().to_string(), "[]");
+        assert_eq!(
+            env.get_value("mixed").unwrap().to_string(),
+            "[1, \"two\", [3]]"
+        );
+    }
+
+    #[test]
+    fn lists_are_mutable_and_share_like_python() {
+        let env = env_after(
+            "a = [1, 2, 3]\n\
+             b = a\n\
+             b.append(4)\n\
+             a[0] = 9\n\
+             inner = [1]\n\
+             outer = [inner]\n\
+             outer[0].append(2)\n\
+             alias_value = a\n\
+             a.append(5)",
+        );
+
+        assert_eq!(env.get_value("a").unwrap().to_string(), "[9, 2, 3, 4, 5]");
+        assert_eq!(env.get_value("b").unwrap().to_string(), "[9, 2, 3, 4, 5]");
+        assert_eq!(
+            env.get_value("alias_value").unwrap().to_string(),
+            "[9, 2, 3, 4, 5]"
+        );
+        assert_eq!(env.get_value("inner").unwrap().to_string(), "[1, 2]");
+        assert_eq!(env.get_value("outer").unwrap().to_string(), "[[1, 2]]");
+    }
+
+    #[test]
+    fn lists_support_membership_tests() {
+        let env = env_after(
+            "a = [1, 2, 3]\n\
+             has_two = 2 in a\n\
+             has_four = 4 in a\n\
+             missing = 4 not in a\n\
+             text_has = \"b\" in \"abc\"\n\
+             map_has = 2 in {1: \"a\", 2: \"b\"}\n\
+             set_has = 2 in hashSet(1, 2, 3)",
+        );
+
+        assert_eq!(env.get_value("has_two").unwrap(), Value::Bool(true));
+        assert_eq!(env.get_value("has_four").unwrap(), Value::Bool(false));
+        assert_eq!(env.get_value("missing").unwrap(), Value::Bool(true));
+        assert_eq!(env.get_value("text_has").unwrap(), Value::Bool(true));
+        assert_eq!(env.get_value("map_has").unwrap(), Value::Bool(true));
+        assert_eq!(env.get_value("set_has").unwrap(), Value::Bool(true));
+    }
+
+    #[test]
+    fn list_slices_can_be_assigned() {
+        let env = env_after(
+            "a = [1, 2, 3, 4, 5]\n\
+             a[1:3] = [7, 8, 9]\n\
+             a[2:2] = [0]\n\
+             a[::3] = [10, 20, 30]\n\
+             a[::-1] = [100, 200, 300, 400, 500, 600, 700]\n\
+             b = [1, 2, 3]\n\
+             b[10:10] = [4]\n\
+             c = [1, 2]\n\
+             c[:] = [9]",
+        );
+
+        assert_eq!(
+            env.get_value("a").unwrap().to_string(),
+            "[700, 600, 500, 400, 300, 200, 100]"
+        );
+        assert_eq!(env.get_value("b").unwrap().to_string(), "[1, 2, 3, 4]");
+        assert_eq!(env.get_value("c").unwrap().to_string(), "[9]");
+    }
+
+    #[test]
+    fn del_removes_list_items_slices_and_map_entries() {
+        let env = env_after(
+            "a = [1, 2, 3, 4, 5]\n\
+             del a[1]\n\
+             del a[1:3]\n\
+             b = [0, 1, 2, 3, 4, 5]\n\
+             del b[::2]\n\
+             d = {1: \"a\", 2: \"b\"}\n\
+             del d[1]",
+        );
+
+        assert_eq!(env.get_value("a").unwrap().to_string(), "[1, 5]");
+        assert_eq!(env.get_value("b").unwrap().to_string(), "[1, 3, 5]");
+        assert_eq!(env.get_value("d").unwrap().to_string(), "{2: \"b\"}");
+
+        let error = error_of("text = \"abc\"\ndel text[0]");
+        assert!(error.message.contains("not a hashmap or list"), "{error}");
+        assert_eq!(error.line, 2);
+    }
+
+    #[test]
+    fn list_methods_match_python() {
+        let env = env_after(
+            "a = [3, 1, 2]\n\
+             a.sort()\n\
+             sorted = a.copy()\n\
+             a.reverse()\n\
+             a.append(4)\n\
+             a.extend([5, 6])\n\
+             a.insert(-1, 9)\n\
+             removed = a.pop()\n\
+             count = a.count(3)\n\
+             index = a.index(9)\n\
+             a.remove(9)\n\
+             copied = a.copy()\n\
+             copied.append(99)\n\
+             values = a + [7]\n\
+             repeated = [0] * 3\n\
+             from_text = list(\"abc\")\n\
+             length = len(a)",
+        );
+
+        assert_eq!(env.get_value("sorted").unwrap().to_string(), "[1, 2, 3]");
+        assert_eq!(
+            env.get_value("a").unwrap().to_string(),
+            "[3, 2, 1, 4, 5]"
+        );
+        assert_eq!(env.get_value("removed").unwrap(), Value::Int(6));
+        assert_eq!(env.get_value("count").unwrap(), Value::Int(1));
+        assert_eq!(env.get_value("index").unwrap(), Value::Int(5));
+        assert_eq!(env.get_value("copied").unwrap().to_string(), "[3, 2, 1, 4, 5, 99]");
+        assert_eq!(
+            env.get_value("values").unwrap().to_string(),
+            "[3, 2, 1, 4, 5, 7]"
+        );
+        assert_eq!(
+            env.get_value("repeated").unwrap().to_string(),
+            "[0, 0, 0]"
+        );
+        assert_eq!(
+            env.get_value("from_text").unwrap().to_string(),
+            "[\"a\", \"b\", \"c\"]"
+        );
+        assert_eq!(env.get_value("length").unwrap(), Value::Int(5));
+    }
+
+    #[test]
+    fn list_type_annotations_and_errors_report_the_line() {
+        let env = env_after(
+            "def first(xs: List) { xs[0] }\n\
+             value = first([7, 8])",
+        );
+        assert_eq!(env.get_value("value").unwrap(), Value::Int(7));
+
+        let error = error_of("a = [1]\nprint(a[\"x\"])");
+        assert!(error.message.contains("list index must be an int"), "{error}");
+        assert_eq!(error.line, 2);
+
+        let error = error_of("a = [1]\nprint(a[3])");
+        assert!(error.message.contains("out of range"), "{error}");
+        assert_eq!(error.line, 2);
+
+        let error = error_of("a = [1]\nprint(a[::0])");
+        assert!(error.message.contains("slice step cannot be zero"), "{error}");
+        assert_eq!(error.line, 2);
+
+        let error = error_of("a = [1, 2, 3]\na[::2] = [1]");
+        assert!(error.message.contains("extended slice"), "{error}");
+
+        let error = error_of("a = []\na.pop()");
+        assert!(error.message.contains("pop from empty list"), "{error}");
+
+        let error = error_of("a = [1]\na.remove(2)");
+        assert!(error.message.contains("is not in the list"), "{error}");
+
+        let error = error_of("a = [1, \"x\"]\na.sort()");
+        assert!(error.message.contains("only supports lists"), "{error}");
+    }
+
+    #[test]
     fn hashmaps_support_literals_indexing_and_assignment() {
         let env = env_after(
             "scores = {\"a\": 1, \"b\": 2}\n\
@@ -1928,6 +3039,140 @@ mod tests {
         assert_eq!(
             env.get_value("short").unwrap(),
             Value::Text("Hi, Nirab".into())
+        );
+    }
+
+    #[test]
+    fn hashmap_loops_can_bind_key_and_value() {
+        let env = env_after(
+            "total = 0\n\
+             for key, value in {1: 10, 2: 20} {\n\
+             \x20   total = total + key + value\n\
+             }\n\
+             def min(input: Hashmap) {\n\
+             \x20   lowest = input[0]\n\
+             \x20   for n, i in input {\n\
+             \x20       if i < lowest {\n\
+             \x20           lowest = i\n\
+             \x20       }\n\
+             \x20   }\n\
+             \x20   lowest\n\
+             }\n\
+             smallest = min({0: 5, 1: 3, 2: 8})",
+        );
+
+        assert_eq!(env.get_value("total").unwrap(), Value::Int(33));
+        assert_eq!(env.get_value("smallest").unwrap(), Value::Int(3));
+
+        let error = error_of("for a, b in hashSet(1) { }\nfor c, d, e in {} { }");
+        assert!(
+            error.message.contains("at most two loop variables"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn final_expression_returns_implicitly() {
+        let env = env_after(
+            "def double(x: Int) { x * 2 }\n\
+             def do_nothing() { }\n\
+             a = double(4)\n\
+             b = do_nothing()",
+        );
+
+        assert_eq!(env.get_value("a").unwrap(), Value::Int(8));
+        assert_eq!(env.get_value("b").unwrap(), Value::None);
+
+        let error = error_of("for a, b in 1 { }");
+        assert!(
+            error
+                .message
+                .contains("two-variable 'for' loops need a hashmap"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn functions_accept_parameter_type_annotations() {
+        let env = env_after(
+            "def minimum(x: Int, fallback: Int = 10) {\n\
+             \x20   return x\n\
+             }\n\
+             a = minimum(7)\n\
+             b = minimum(3, 9)\n\
+             def label(value: Text) { return value }\n\
+             c = label(\"ok\")\n\
+             def any_value(value: Any) { return value }\n\
+             d = any_value(True)\n\
+             def number(value: Number) { return value }\n\
+             e = number(1.5)",
+        );
+
+        assert_eq!(env.get_value("a").unwrap(), Value::Int(7));
+        assert_eq!(env.get_value("b").unwrap(), Value::Int(3));
+        assert_eq!(env.get_value("c").unwrap(), Value::Text("ok".into()));
+        assert_eq!(env.get_value("d").unwrap(), Value::Bool(true));
+        assert_eq!(env.get_value("e").unwrap(), Value::Float(1.5));
+    }
+
+    #[test]
+    fn parameter_type_errors_report_the_call_line() {
+        let error = error_of(
+            "def minimum(x: Int) {\n\
+             \x20   return x\n\
+             }\n\
+             minimum(\"nope\")",
+        );
+        assert!(
+            error
+                .message
+                .contains("argument 'x' to function 'minimum' must be Int, got text"),
+            "{error}"
+        );
+        assert_eq!(error.line, 4);
+
+        let error = error_of("def f(value: Missing) { return value }\nf(1)");
+        assert!(
+            error
+                .message
+                .contains("unknown type annotation 'Missing'"),
+            "{error}"
+        );
+        assert_eq!(error.line, 2);
+    }
+
+    #[test]
+    fn parameter_annotations_support_structs_traits_and_type_parameters() {
+        let env = env_after(
+            "trait Named {\n\
+             \x20   def name(self)\n\
+             }\n\
+             struct Person { name = \"\" }\n\
+             impl Named for Person {\n\
+             \x20   def name(self) { return self.name }\n\
+             }\n\
+             def person_name(value: Person) { return value.name }\n\
+             def named_name<T: Named>(value: T) { return value.name() }\n\
+             def identity<T>(value: T) { return value }\n\
+             a = person_name(Person(\"Ada\"))\n\
+             b = named_name(Person(\"Nirab\"))\n\
+             c = identity(5)",
+        );
+
+        assert_eq!(env.get_value("a").unwrap(), Value::Text("Ada".into()));
+        assert_eq!(env.get_value("b").unwrap(), Value::Text("Nirab".into()));
+        assert_eq!(env.get_value("c").unwrap(), Value::Int(5));
+
+        let error = error_of(
+            "struct Plain { x = 1 }\n\
+             def f(value: Plain) { return value }\n\
+             f(1)",
+        );
+        assert!(
+            error
+                .message
+                .contains("must be Plain, got int"),
+            "{error}"
         );
     }
 
@@ -2342,6 +3587,244 @@ mod tests {
         assert_eq!(
             env.get_value("pair").unwrap().to_string(),
             "Pair(left=\"x\", right=2)"
+        );
+    }
+
+    #[test]
+    fn imports_functions_structs_and_traits_from_another_file() {
+        let (directory, main) = temp_project("definitions");
+        fs::write(
+            directory.join("lib.dsq"),
+            r#"
+def add(a, b) {
+    return a + b
+}
+
+struct Point { x y }
+
+trait Labeled {
+    def label(self)
+}
+
+impl Labeled for Point {
+    def label(self) {
+        return "point"
+    }
+}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            &main,
+            r#"
+import "lib.dsq"
+
+total = add(2, 3)
+point = Point(4, 5)
+label = point.label()
+"#,
+        )
+        .unwrap();
+
+        let mut env = Env::new();
+        run_file_with_env(&mut env, &main).unwrap();
+
+        assert_eq!(env.get_value("total").unwrap(), Value::Int(5));
+        assert_eq!(env.get_value("label").unwrap(), Value::Text("point".into()));
+    }
+
+    #[test]
+    fn extensionless_imports_share_macros_both_ways() {
+        let (directory, main) = temp_project("macros");
+        fs::write(
+            directory.join("lib.dsq"),
+            r#"
+def bump() {
+    inc$(value)
+}
+
+macro twice($body) {
+$body
+$body
+}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            &main,
+            r#"
+macro inc($name) {
+$name = $name + 1
+}
+
+import lib
+
+value = 0
+bump()
+twice$({ bump() })
+"#,
+        )
+        .unwrap();
+
+        let mut env = Env::new();
+        run_file_with_env(&mut env, &main).unwrap();
+
+        // `bump()` runs once, then `twice$(...)` runs it twice more.
+        assert_eq!(env.get_value("value").unwrap(), Value::Int(3));
+    }
+
+    #[test]
+    fn duplicate_imports_execute_only_once() {
+        let (directory, main) = temp_project("duplicate");
+        fs::write(directory.join("lib.dsq"), "counter = counter + 1").unwrap();
+        fs::write(
+            &main,
+            r#"
+counter = 0
+import "lib.dsq"
+import "lib.dsq"
+"#,
+        )
+        .unwrap();
+
+        let mut env = Env::new();
+        run_file_with_env(&mut env, &main).unwrap();
+
+        assert_eq!(env.get_value("counter").unwrap(), Value::Int(1));
+    }
+
+    #[test]
+    fn nested_imports_resolve_from_the_importing_files_directory() {
+        let (directory, main) = temp_project("nested");
+        fs::create_dir_all(directory.join("lib")).unwrap();
+        fs::write(
+            directory.join("lib").join("one.dsq"),
+            "import \"two.dsq\"\ndef read_value() { return two_value }",
+        )
+        .unwrap();
+        fs::write(directory.join("lib").join("two.dsq"), "two_value = 99").unwrap();
+        fs::write(
+            &main,
+            r#"
+import lib/one
+result = read_value()
+"#,
+        )
+        .unwrap();
+
+        let mut env = Env::new();
+        run_file_with_env(&mut env, &main).unwrap();
+
+        assert_eq!(env.get_value("result").unwrap(), Value::Int(99));
+    }
+
+    #[test]
+    fn cyclic_imports_report_the_importing_file() {
+        let (directory, main) = temp_project("cycle");
+        fs::write(directory.join("a.dsq"), "import \"b.dsq\"\nvalue = 1").unwrap();
+        fs::write(directory.join("b.dsq"), "import \"a.dsq\"\nvalue = 2").unwrap();
+        fs::write(&main, "import \"a.dsq\"").unwrap();
+
+        let mut env = Env::new();
+        let error = run_file_with_env(&mut env, &main).unwrap_err();
+
+        assert!(error.message.contains("cyclic import"), "{error}");
+        assert!(
+            error
+                .file
+                .as_deref()
+                .is_some_and(|file| file.ends_with("b.dsq")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn errors_inside_imported_functions_name_the_imported_file() {
+        let (directory, main) = temp_project("function_error");
+        fs::write(
+            directory.join("lib.dsq"),
+            "def divide(a, b) {\n    return a / b\n}",
+        )
+        .unwrap();
+        fs::write(
+            &main,
+            "import \"lib.dsq\"\nresult = divide(1, 0)",
+        )
+        .unwrap();
+
+        let mut env = Env::new();
+        let error = run_file_with_env(&mut env, &main).unwrap_err();
+
+        assert!(error.message.contains("division by zero"), "{error}");
+        assert_eq!(error.line, 2);
+        assert!(
+            error
+                .file
+                .as_deref()
+                .is_some_and(|file| file.ends_with("lib.dsq")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn errors_in_imported_top_level_code_name_the_file() {
+        let (directory, main) = temp_project("top_level_error");
+        fs::write(
+            directory.join("lib.dsq"),
+            "value = 1\nbroken = value / 0",
+        )
+        .unwrap();
+        fs::write(&main, "import \"lib.dsq\"").unwrap();
+
+        let mut env = Env::new();
+        let error = run_file_with_env(&mut env, &main).unwrap_err();
+
+        assert!(error.message.contains("division by zero"), "{error}");
+        assert_eq!(error.line, 2);
+        assert!(
+            error
+                .file
+                .as_deref()
+                .is_some_and(|file| file.ends_with("lib.dsq")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn missing_imports_report_the_import_line() {
+        let (_directory, main) = temp_project("missing");
+        fs::write(&main, "x = 1\nimport \"missing.dsq\"").unwrap();
+
+        let mut env = Env::new();
+        let error = run_file_with_env(&mut env, &main).unwrap_err();
+
+        assert!(error.message.contains("cannot import"), "{error}");
+        assert_eq!(error.line, 2);
+        assert!(
+            error
+                .file
+                .as_deref()
+                .is_some_and(|file| file.ends_with("main.dsq")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn runtime_errors_in_the_main_file_name_it() {
+        let (_directory, main) = temp_project("main_error");
+        fs::write(&main, "x = 1\ny = x / 0").unwrap();
+
+        let mut env = Env::new();
+        let error = run_file_with_env(&mut env, &main).unwrap_err();
+
+        assert!(error.message.contains("division by zero"), "{error}");
+        assert_eq!(error.line, 2);
+        assert!(
+            error
+                .file
+                .as_deref()
+                .is_some_and(|file| file.ends_with("main.dsq")),
+            "{error}"
         );
     }
 }

@@ -6,6 +6,72 @@ Release history for D#².
 Each release lists the language changes and the notes that matter for users.
 """
 
+## v1.3.0 — 2026-11-06
+
+"""
+Python-style lists, multifile imports, typed parameters, and implicit returns.
+"""
+
+### Language
+
+"""
+
+- `import "path.dsq"` loads another script; `import path` is shorthand for
+  `path.dsq`. Relative imports search the running interpreter’s install
+  directory and its `lib/` subfolder first, then the importing file’s directory.
+- Quoted `./` and `../` paths skip the install search and resolve only relative
+  to the importing file; absolute quoted paths are used as-is.
+- Imported files are parsed with the shared macro table, so macros can cross
+  file boundaries in either direction (before or after the `import`).
+- Imported statements execute where the `import` appears and share the current
+  scope. A file runs at most once per program; cycles are rejected at parse time
+  with a `cyclic import` error.
+- Runtime and parse errors from imported files include the file name, for
+  example `lib/math.dsq:line 2: division by zero`.
+- Function and method parameters accept type annotations such as `x: Int`.
+  Built-ins (`Int`, `Float`, `Number`, `Bool`, `Text`, `Any`, `HashSet`,
+  `HashMap`, `Matrix`) plus struct, trait, and type-parameter names are checked
+  when the function is called.
+- `for key, value in hashmap { ... }` binds both the key and its value.
+- A function or method whose final statement is a bare expression returns that
+  expression implicitly.
+- Python-style lists: `[1, 2, 3]`, `[]`, mixed and nested values, `len(list)`,
+  `list(iterable)`, concatenation with `+`, and repetition with `*`.
+- Lists are mutable reference values like Python: `b = a` shares the same list,
+  so appending through `b` is visible through `a`. Indexing supports negative
+  positions, and slicing supports `start:stop:step` with omitted bounds and
+  negative steps.
+- List assignment supports `a[i] = value`, `a[start:stop] = values`, and
+  extended-slice assignment with matching lengths. `del a[i]` and
+  `del a[start:stop]` remove items; `del d[key]` removes a hashmap entry.
+- List methods: `append`, `extend`, `insert`, `remove`, `pop`, `clear`, `index`,
+  `count`, `sort`, `reverse`, and `copy`.
+- The `in` and `not in` operators work on lists, texts, hashsets, hashmaps, and
+  matrix row names.
+- Text also supports slicing with the same `start:stop:step` syntax.
+
+"""
+
+### Notes
+
+"""
+
+- Imports are file inclusion, not namespaces: there is no `module.name` access
+  or selective import. Put imports at the top level.
+- Bare imports prefer installed libraries over local files with the same name;
+  use `./name` to force the file next to the importing script.
+- A path with no extension gets `.dsq` appended. Quoted paths may be absolute
+  or contain `..`; unquoted paths use `/` segments such as `lib/math`.
+- Lists are reference values, but `del` and slice assignment only target a
+  variable base (`a[0] = 1`, `del a[0]`); chained targets such as
+  `d["a"][0] = 1` are not supported.
+- `list.sort()` supports lists containing only numbers, only text, or only
+  bools; mixed-type sorting is an error.
+- There are no list comprehensions, tuple unpacking, keyword arguments, or
+  list/dict `.items()`-style iteration pairs yet.
+
+"""
+
 ## v1.2.0 — 2026-11-02
 
 """

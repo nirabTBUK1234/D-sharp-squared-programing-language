@@ -57,6 +57,7 @@ pub enum TokenKind {
     Impl,
     Trait,
     Macro,
+    Import,
 
     // literals
     Identifier(String),
@@ -276,6 +277,7 @@ fn keyword(word: &str) -> TokenKind {
         "impl" => TokenKind::Impl,
         "trait" => TokenKind::Trait,
         "macro" => TokenKind::Macro,
+        "import" => TokenKind::Import,
         "and" => TokenKind::And,
         "or" => TokenKind::Or,
         "not" => TokenKind::Not,

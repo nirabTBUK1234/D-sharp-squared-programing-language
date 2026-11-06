@@ -6,15 +6,19 @@ A small, interpreted programming language implemented in Rust. The keywords are
 Pythonic (`def`, `if`/`elif`/`else`, `x = 1`, `True`/`False`/`None`, `#`
 comments) but blocks use braces instead of indentation. It has a real lexer and
 recursive-descent parser, functions with defaults and recursion, loops,
-hashsets, hashmaps, matrices, structs with `impl` methods, traits and
-trait-bounded functions, token macros, console built-ins, and a REPL.
+hashsets, hashmaps, matrices, Python-style lists, structs with `impl` methods,
+traits and trait-bounded functions, token macros, multifile imports, console
+built-ins, and a REPL.
 
-It is still an early prototype: no modules, `match`/enums, or closures yet — see
-[Roadmap](#roadmap) and [Known limitations](#known-limitations).
+It is still an early prototype: no namespaced modules, `match`/enums, or
+closures yet — see [Roadmap](#roadmap) and [Known limitations](#known-limitations).
 
-- **v1.2.0** — current release (2026-11-02): structs with default fields, `impl`
-  methods, traits with required/default methods, trait-bounded functions, and
-  `name$(...)` token macros.
+- **v1.3.0** — current release (2026-11-06): Python-style lists with slicing and
+  methods, multifile imports, typed parameters, two-variable hashmap loops, and
+  implicit final-expression returns.
+- **v1.2.0** — structs with default fields, `impl` methods, traits with
+  required/default methods, trait-bounded functions, and `name$(...)` token
+  macros (2026-11-02).
 - **v1.1.0** — collection syntax release (2026-11-01): `hashSet(...)`, `{...}`
   hashmaps with `[ ]` indexing, text indexing, and `mat{...}`-only matrices.
 - **v1.0.0** — first stable release (2026-11-01); see
@@ -111,7 +115,8 @@ console built-ins.
 | Int | `42`, `-7` | 64-bit signed |
 | Float | `3.14`, `-0.5` | 64-bit |
 | Bool | `True`, `False` | `true`/`false` are also accepted |
-| Text | `"hello"`, `'hi there'` | |
+| Text | `"hello"`, `'hi there'` | Supports indexing and slicing |
+| List | `[1, 2, 3]`, `[]` | Mutable, reference-shared, mixed values; indexing, slicing, and methods |
 | Hashset | `hashSet(1, 2, 2)` / `set(1, 2)` | Duplicates collapse; scalars only |
 | Hashmap | `{"a": 1, "b": 2}` | Keys can be int, float, bool, or text; read/write with `[ ]` |
 | Matrix | `mat{row1: {a: 1, b: 2}}` | Named rows of named cells; `matrix`/`matrex` are aliases |
@@ -172,8 +177,10 @@ for ch in "abc" {
 
 - Conditions must be `bool`; there is no truthiness, so `if 1 { }` is an error.
 - `elif` may follow `}` on the same line or the next line.
-- `for name in <value>` iterates a `hashSet` (its items), a `hashmap` (its keys),
-  a `matrix` (row names, sorted), or `text` (characters).
+- `for name in <value>` iterates a `list` or `hashSet` (items), a `hashmap`
+  (keys), a `matrix` (row names, sorted), or `text` (characters).
+- `for key, value in <hashmap>` binds both the key and its value. Two-variable
+  loops are only supported for hashmaps.
 - `break` and `continue` only work inside a loop.
 - `loop { }` is a convenience for `while True` and is the one non-Python
   control-flow keyword kept as an extension.
@@ -189,22 +196,32 @@ def greet(name, punctuation = "!") {
     return "Hello, " + name + punctuation
 }
 
-def fact(n) {
+def fact(n: Int) {
     if n <= 1 { return 1 }
     return n * fact(n - 1)
+}
+
+def double(x: Int) {
+    x * 2                    # the final expression is the return value
 }
 
 print(greet("Nirab"))          # Hello, Nirab!
 print(greet("Nirab", "?"))     # Hello, Nirab?
 print(fact(5))                 # 120
+print(double(4))               # 8
 ```
 
 - Parameters come before the optional defaults; a required parameter may not
   follow one with a default.
+- A parameter may be annotated as `name: Type`, for example `x: Int`. Built-in
+  annotations are `Int`, `Float`, `Number`, `Bool`, `Text`, `Any`, `List`,
+  `HashSet`, `HashMap`, and `Matrix`; a struct, trait, or type-parameter name can
+  also be used. Annotations are checked when the function is called.
 - Defaults are evaluated when the function is called, in the function's scope,
   so they can refer to earlier parameters.
-- `return` ends the function and returns a value. Bare `return`, or falling off
-  the end, gives `None`.
+- `return` ends the function and returns a value. A bare final expression is
+  returned implicitly (`def double(x) { x * 2 }`); otherwise falling off the
+  end gives `None`.
 - Recursion works (`fact`, `fib`, mutual recursion).
 - A `def` inside a block is still a plain assignment in that scope, so it stays
   visible after the block ends.
@@ -260,7 +277,8 @@ print(q)            # Point(x=0, y=0)
   mutation is not written back.
 - Structs are values: `q = p` copies the fields, so `q.x = 1` does not change
   `p`. Field assignment through the original variable does.
-- There are no generic structs, visibility modifiers, or type annotations yet.
+- There are no generic structs or visibility modifiers yet. Function and method
+  parameters may be annotated, but struct fields cannot yet.
 
 """
 
@@ -322,8 +340,9 @@ s.describe()        # square with side 3
   a trait method with the same name.
 - A trait can be implemented only once per struct, and two different traits
   cannot supply the same method name for one struct.
-- Traits are interfaces plus defaults, not runtime types: there are no type
-  annotations or `is` checks. A trait with no methods is a marker.
+- Traits are interfaces plus defaults, not runtime types: a trait name can be
+  used as a parameter annotation, but there are no `is` checks or trait objects.
+  A trait with no methods is a marker.
 - The trait and the struct must be defined before the `impl` runs.
 
 """
@@ -405,6 +424,49 @@ twice$({ print("hi") })             # prints hi twice
 
 """
 
+### Imports
+
+"""
+
+Split a program across files with `import`. A quoted path is used as written; an
+unquoted path is shorthand for `path.dsq`. Relative imports search the
+interpreter’s install directory first, then the importing file’s directory:
+
+```text
+# lib/math.dsq
+def square(x) {
+    return x * x
+}
+
+# main.dsq
+import lib/math           # install dir, install/lib, then ./lib/math
+# import "./lib/math"     # force a script-relative file
+
+print(square(5))
+```
+
+- Search order for a bare import such as `import lib/math`:
+  1. the directory containing the running interpreter executable
+  2. that directory’s `lib/` subfolder
+  3. the directory containing the file that has the `import`
+- Use `./` or `../` in a quoted path to skip the install search and resolve only
+  relative to the importing file. Absolute quoted paths are used as-is.
+- When running with `cargo run`, the install directory is `target/debug` or
+  `target/release`; for an installed binary it is the binary’s own directory.
+- Imported files are parsed with the same macro table, so macros defined in an
+  imported file are available after the `import`, and macros defined before the
+  `import` are available inside the imported file.
+- Imported statements run where the `import` appears, in the current scope.
+  Put imports at the top level; there are no namespaces.
+- A file runs at most once per program, even if it is imported more than once.
+  Import cycles are rejected at parse time with a `cyclic import` error.
+- Errors from imported files name the file:
+  `lib/math.dsq:line 2: division by zero`.
+- A path with no extension gets `.dsq` appended. Unquoted paths use `/` segments
+  such as `lib/math`.
+
+"""
+
 ### Operators
 
 """
@@ -417,7 +479,8 @@ Lowest to highest precedence:
 | `and`, `&&` | Logical and (short-circuits) |
 | `==`, `!=` | Equality / inequality |
 | `>`, `>=`, `<`, `<=` | Ordering |
-| `+`, `-` | Addition/subtraction; `+` also joins two texts |
+| `in`, `not in` | Membership tests for lists, texts, hashsets, hashmaps, and matrix rows |
+| `+`, `-` | Addition/subtraction; `+` also joins two texts or concatenates two lists |
 | `*`, `/`, `%` | Multiplication, division, remainder |
 | `not`, `!`, unary `-` | Logical not, numeric negation |
 
@@ -431,7 +494,8 @@ same = 1 == 1.0               # True
 
 Notes: `and`/`or` require bools; comparisons work on numbers and texts; dividing
 by zero is a runtime error; `1 == 1.0` is true; integer arithmetic is checked,
-so overflow is an error rather than a wrap.
+so overflow is an error rather than a wrap. `[0] * 3` repeats a list, and
+`2 in [1, 2, 3]` tests membership.
 
 """
 
@@ -441,21 +505,60 @@ so overflow is an error rather than a wrap.
 
 ```text
 nums = hashSet(1, 2, 2, 3)
+items = [1, "two", [3]]
 scores = {"a": 1, "b": 2}
 scores["c"] = 3
 grid = mat{row1: {a: 1, b: 2}, row2: {a: 3}}
 
 print(nums)          # hashSet(1, 2, 3)
+print(items)         # [1, "two", [3]]
 print(scores)        # {"a": 1, "b": 2, "c": 3}
 print(scores["b"])   # 2
 print(grid)          # mat{row1: {a: 1, b: 2}, row2: {a: 3}}
 print("abc"[-1])     # c
 ```
 
+**Lists.** `[value, ...]` creates a Python-style mutable list and `[]` is the
+empty list. Lists may mix types, nest, and are shared references: `b = a` makes
+`b` point at the same list, so `b.append(4)` is visible through `a`.
+
+```text
+a = [1, 2, 3, 4, 5]
+print(a[0], a[-1])        # 1 5
+print(a[1:3])             # [2, 3]
+print(a[::-1])            # [5, 4, 3, 2, 1]
+print(a[::2])             # [1, 3, 5]
+
+a[0] = 9
+a[1:3] = [7, 8]
+del a[0]
+a.append(6)
+a.extend([10, 11])
+a.insert(1, 4)
+a.remove(8)
+last = a.pop()
+a.sort()
+a.reverse()
+copy = a.copy()
+print(len(a), 2 in a, 4 not in a)
+```
+
+Slices use `start:stop:step`, and any part may be omitted (`a[:]`, `a[::2]`,
+`a[::-1]`). Indexing and slicing accept negative positions. Slice assignment
+replaces a range; extended slices such as `a[::2] = [...]` require the same
+number of items. `del a[i]` and `del a[start:stop]` remove items in place.
+Text also supports slicing, for example `"abc"[1:]` is `"bc"`.
+
+List methods: `append`, `extend`, `insert`, `remove`, `pop`, `clear`, `index`,
+`count`, `sort`, `reverse`, and `copy`. `len(a)` reports the length, and
+`list(iterable)` builds a list from a list, text, hashset, hashmap keys, or
+matrix row names. `a + b` concatenates lists and `a * n` repeats one. `sort()`
+works on lists containing only numbers, only text, or only bools.
+
 **Hashsets.** `hashSet(...)` builds a set from its arguments (`set(...)` and
 `hashset(...)` are aliases); duplicates collapse, and `hashSet()` is empty.
-Items must be Int, Float, Bool, or Text — nesting a hashset, hashmap, or matrix
-is an error. Values print sorted, but iteration order is the hash order.
+Items must be Int, Float, Bool, or Text — nesting a list, hashset, hashmap, or
+matrix is an error. Values print sorted, but iteration order is the hash order.
 
 **Hashmaps.** `{ key: value, ... }` is a Python-style dictionary. Keys are
 expressions and may be int, float, bool, or text; values are any expression.
@@ -486,9 +589,11 @@ weird = mat{
 }
 ```
 
-**Indexing and iteration.** `[ ]` also indexes text (`"abc"[0]` is `"a"`,
-`"abc"[-1]` is `"c"`). `for` iterates hashset items, hashmap keys, matrix row
-names, or text characters.
+**Indexing and iteration.** `[ ]` indexes lists and texts (`"abc"[0]` is `"a"`,
+`"abc"[-1]` is `"c"`) and reads/writes hashmap entries. Lists and texts also
+support slicing. `for` iterates list items, hashset items, hashmap keys, matrix
+row names, or text characters. Membership tests (`in` / `not in`) work on the
+same containers.
 
 """
 
@@ -619,9 +724,10 @@ The REPL prints the same format and keeps going.
   (`hashSet(...)`, `{key: value}` hashmaps with `[ ]` indexing, `mat{...}`).
 - Done: `struct` records with defaults, `impl` methods with `self`, traits
   (`trait`/`impl Trait for Type`, required and default methods), trait-bounded
-  functions (`def name<T: Trait>(value)`), and statement token macros
-  (`macro name($a) { ... }`, called with `name$(...)`).
-- Next: `match`/enums, closures/lexical scoping, modules (`use`/`import`), then
+  functions (`def name<T: Trait>(value)`), statement token macros
+  (`macro name($a) { ... }`, called with `name$(...)`), and multifile imports
+  (`import "file.dsq"` / `import name`).
+- Next: `match`/enums, closures/lexical scoping, namespaced modules, then
   `try`/`except`/`raise`.
 - Built-in methods: only `console.*` (plus `print`/`input`) is implemented; the
   `file`, `data`, `collections`, `query`, `matrex`, `time`, `math`, `game`, and
@@ -633,31 +739,41 @@ The REPL prints the same format and keeps going.
 
 """
 
-- No modules, `match`/enums, `try`/`except`, or lambdas. `{...}`
+- No namespaced modules: `import` includes a file's definitions in the current
+  scope. There is no `module.name` access or selective `from ... import ...`.
+  Put imports at the top level; imported files run at most once.
+- No `match`/enums, `try`/`except`, or lambdas. `{...}`
   is a hashmap literal; `mat{...}` is the matrix type.
 - No generic structs or generic methods: type parameters with trait bounds are
   only supported on free functions, and they map to leading value parameters by
-  position. They are call-time checks, not static types.
-- Traits are interfaces with defaults, not types: there are no type annotations,
-  runtime `is` checks, or trait objects. Two traits cannot provide the same
-  method name for one struct; there is no explicit disambiguation syntax.
+  position. Parameter annotations and trait bounds are call-time checks, not
+  static types.
+- Traits are interfaces with defaults, not types: there are no runtime `is`
+  checks or trait objects. Two traits cannot provide the same method name for
+  one struct; there is no explicit disambiguation syntax.
 - No ownership, borrowing, or static types: this is a dynamic interpreter, so
   Rust's borrow checker has no counterpart here.
 - Functions are dynamically scoped: a called function sees the *caller's*
   variables. There are no closures and no first-class function values yet.
-- No named/keyword arguments at call sites; defaults are positional.
-- No imports.
+- No named/keyword arguments at call sites; defaults are positional. In
+  particular, `list.sort()` has no `key=` or `reverse=` arguments.
+- No list comprehensions, tuple unpacking (`a, b = [1, 2]`), or range objects;
+  build lists with literals, `list(iterable)`, loops, and `append`/`extend`.
+- Lists support equality and membership, but ordering comparisons such as
+  `[1] < [2]` are not implemented.
 - Macros are textual and unhygienic; they only expand in statement position and
   must be invoked with `name$(...)`.
-- Methods write mutations back only when called on a plain variable; nested
-  receivers such as `outer.inner.shift(...)` do not propagate the change.
+- Struct methods write mutations back only when called on a plain variable;
+  nested receivers such as `outer.inner.shift(...)` do not propagate the change.
+  List methods mutate shared list references, so `outer[0].append(x)` does work.
 - Struct names are constructors, not first-class values: `C = Point` does not
   work; call `Point(...)` directly.
 - Numeric literals cannot start with a dot (`0.5` works, `.5` does not).
 - A map literal cannot start a statement (that position is a block); assign it
   to a name instead (`d = {}`).
-- Index assignment only targets a variable base (`d["a"] = 1`); chained writes
-  like `d["a"]["b"] = 1` are not supported.
+- Index assignment, slice assignment, and `del` only target a variable base
+  (`d["a"] = 1`, `a[0] = 1`, `del a[0]`); chained writes like
+  `d["a"]["b"] = 1` are not supported.
 - Hashmap display is sorted, not insertion-ordered.
 - `builtin_functions.json` is larger than the implemented surface (see above).
 
