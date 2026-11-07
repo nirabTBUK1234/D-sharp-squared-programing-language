@@ -6,6 +6,48 @@ Release history for D#².
 Each release lists the language changes and the notes that matter for users.
 """
 
+## v1.6.0 — 2026-11-07
+
+"""
+Pythonic test blocks and assertions.
+"""
+
+### Language
+
+"""
+
+- `test name { ... }` and `test "description" { ... }` declare tests. Tests are
+  registered when a file runs and execute only with `--test`.
+- `dsharp2 --test file.dsq` (or `cargo run -- --test file.dsq`) runs every test
+  declared by the file and its imports, printing `ok`/`FAILED` per test and a
+  summary. The process exits with status 1 when any test fails.
+- `assert(condition)` and `assert(condition, message)` fail when the condition
+  is false.
+- `assert_eq(left, right)` and `assert_eq(left, right, message)` compare with
+  the language’s value equality and report both values on failure.
+- `assert_ne(left, right)` and `assert_ne(left, right, message)` require the
+  values to differ.
+- Each test runs in its own scope. Duplicate test names are rejected.
+- Normal script runs ignore test blocks, so test files can be executed or
+  imported without running the tests.
+
+"""
+
+### Notes
+
+"""
+
+- Assertions are plain builtins, not macros: write `assert_eq(a, b)` rather
+  than `assert_eq!(a, b)`.
+- Test failures report the source file and line, for example
+  `assert_eq failed: left = 3, right = 4`.
+- Tests run after the file’s top-level statements, so helper functions,
+  structs, traits, and imports are available.
+- The test runner does not yet support filtering, ignored tests, or expected
+  failure annotations.
+
+"""
+
 ## v1.5.0 — 2026-11-07
 
 """

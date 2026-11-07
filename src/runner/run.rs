@@ -43,6 +43,66 @@ pub fn run_with_env(env: &mut Env, source: &str) -> Result<(), Error> {
     Interpreter::new(env).run(&statements)
 }
 
+/// One executed `test` block.
+pub struct TestResult {
+    pub name: String,
+    pub outcome: Result<(), Error>,
+}
+
+/// The result of running every test declared by a file.
+pub struct TestReport {
+    pub results: Vec<TestResult>,
+}
+
+impl TestReport {
+    pub fn passed(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|result| result.outcome.is_ok())
+            .count()
+    }
+
+    pub fn failed(&self) -> usize {
+        self.results.len() - self.passed()
+    }
+
+    pub fn is_success(&self) -> bool {
+        self.failed() == 0
+    }
+}
+
+/// Runs a script normally (so its imports and definitions exist), then runs
+/// every `test` block declared by it or by an imported file.
+pub fn run_test_file(path: &str) -> Result<TestReport, Box<dyn StdError>> {
+    let mut env = Env::new();
+    run_file_with_env(&mut env, Path::new(path))?;
+    Ok(run_tests(&mut env))
+}
+
+fn run_tests(env: &mut Env) -> TestReport {
+    let tests = env.tests();
+    let mut results = Vec::with_capacity(tests.len());
+
+    for test in tests {
+        env.push_scope();
+        let outcome = Interpreter::with_file(env, test.file.clone())
+            .exec_statements(&test.body)
+            .map(|_| ())
+            .map_err(|error| match &test.file {
+                Some(file) => error.with_file(file.clone()),
+                None => error,
+            });
+        env.pop_scope();
+
+        results.push(TestResult {
+            name: test.name.clone(),
+            outcome,
+        });
+    }
+
+    TestReport { results }
+}
+
 /// Python-style scoping: a scope is created per function call. Blocks
 /// (`if`, loops, `{ ... }`) do not introduce scopes, so names assigned in
 /// them stay visible afterwards.
@@ -54,6 +114,14 @@ pub struct Env {
     /// Canonical paths of files that have already run. Imports are global to
     /// the environment, even when their statements appear inside a block.
     imported: HashSet<String>,
+    /// Tests declared with `test name { ... }`, in declaration order.
+    tests: Vec<Rc<TestDef>>,
+}
+
+struct TestDef {
+    name: String,
+    body: Vec<Stmt>,
+    file: Option<String>,
 }
 
 struct Function {
@@ -114,6 +182,7 @@ impl Env {
             structs: vec![HashMap::new()],
             traits: vec![HashMap::new()],
             imported: HashSet::new(),
+            tests: Vec::new(),
         }
     }
 
@@ -170,6 +239,24 @@ impl Env {
             .iter()
             .rev()
             .find_map(|scope| scope.get(name).cloned())
+    }
+
+    fn define_test(
+        &mut self,
+        name: String,
+        body: Vec<Stmt>,
+        file: Option<String>,
+    ) -> Result<(), String> {
+        if self.tests.iter().any(|test| test.name == name) {
+            return Err(format!("duplicate test '{name}'"));
+        }
+
+        self.tests.push(Rc::new(TestDef { name, body, file }));
+        Ok(())
+    }
+
+    fn tests(&self) -> Vec<Rc<TestDef>> {
+        self.tests.clone()
     }
 
     fn define_struct(&mut self, name: String, definition: StructDef) {
@@ -1005,6 +1092,12 @@ impl<'a> Interpreter<'a> {
                 );
                 Ok(Flow::Normal)
             }
+            StmtKind::Test { name, body } => {
+                self.env
+                    .define_test(name.clone(), body.clone(), self.current_file.clone())
+                    .map_err(|message| Error::new(line, message))?;
+                Ok(Flow::Normal)
+            }
             StmtKind::Return(value) => {
                 if self.function_depth == 0 {
                     return Err(Error::new(line, "'return' outside of a function"));
@@ -1395,6 +1488,71 @@ impl<'a> Interpreter<'a> {
                 }
 
                 Ok(Value::HashSet(items))
+            }
+            "assert" => {
+                if values.is_empty() || values.len() > 2 {
+                    return Err(Error::new(
+                        line,
+                        format!(
+                            "assert() takes 1 or 2 arguments, but {} given",
+                            values.len()
+                        ),
+                    ));
+                }
+
+                let Value::Bool(condition) = &values[0] else {
+                    return Err(Error::new(
+                        line,
+                        format!(
+                            "assert() condition must be a bool, got {}",
+                            values[0].type_name()
+                        ),
+                    ));
+                };
+
+                if *condition {
+                    return Ok(Value::None);
+                }
+
+                let message = values.get(1).map(ToString::to_string);
+                Err(Error::new(
+                    line,
+                    match message {
+                        Some(message) => format!("assertion failed: {message}"),
+                        None => "assertion failed".to_string(),
+                    },
+                ))
+            }
+            "assert_eq" | "assert_ne" => {
+                if values.len() < 2 || values.len() > 3 {
+                    return Err(Error::new(
+                        line,
+                        format!(
+                            "{name}() takes 2 or 3 arguments, but {} given",
+                            values.len()
+                        ),
+                    ));
+                }
+
+                let same = equal(&values[0], &values[1]);
+                let should_be_same = name == "assert_eq";
+                if same == should_be_same {
+                    return Ok(Value::None);
+                }
+
+                let detail = format!(
+                    "left = {}, right = {}",
+                    repr_value(&values[0]),
+                    repr_value(&values[1])
+                );
+                let message = values.get(2).map(ToString::to_string);
+                Err(Error::new(
+                    line,
+                    match message {
+                        Some(message) => format!("{name} failed: {message} ({detail})"),
+                        None => format!("{name} failed: {detail}"),
+                    },
+                ))
             }
             "print" => {
                 let parts: Vec<String> = values.iter().map(ToString::to_string).collect();
@@ -3820,6 +3978,109 @@ mod tests {
                 .contains("must return Int, but returns Text"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn test_blocks_are_registered_and_run_with_assertions() {
+        let mut env = env_after(
+            "def min(input: List[Int]) -> Int {\n\
+             \x20   lowest = input[0]\n\
+             \x20   for i in input[1:] {\n\
+             \x20       if i < lowest { lowest = i }\n\
+             \x20   }\n\
+             \x20   lowest\n\
+             }\n\
+             test min_finds_lowest {\n\
+             \x20   assert_eq(min([4, 1, 9, -2]), -2)\n\
+             }\n\
+             test \"min handles one item\" {\n\
+             \x20   assert_eq(min([7]), 7)\n\
+             \x20   assert(True)\n\
+             }",
+        );
+
+        let report = run_tests(&mut env);
+        assert_eq!(report.results.len(), 2);
+        assert_eq!(report.passed(), 2);
+        assert_eq!(report.failed(), 0);
+        assert!(report.is_success());
+    }
+
+    #[test]
+    fn assert_helpers_report_pythonic_messages() {
+        let mut env = Env::new();
+        run_with_env(
+            &mut env,
+            "assert_eq(1, 1)\nassert_ne(1, 2)\nassert(True)",
+        )
+        .unwrap();
+
+        let error = error_of("assert_eq(1, 2)");
+        assert!(
+            error
+                .message
+                .contains("assert_eq failed: left = 1, right = 2"),
+            "{error}"
+        );
+
+        let error = error_of("assert_eq(\"a\", \"b\", \"words differ\")");
+        assert!(
+            error
+                .message
+                .contains("assert_eq failed: words differ (left = \"a\", right = \"b\")"),
+            "{error}"
+        );
+
+        let error = error_of("assert_ne(1, 1)");
+        assert!(
+            error.message.contains("assert_ne failed: left = 1, right = 1"),
+            "{error}"
+        );
+
+        let error = error_of("assert(False, \"nope\")");
+        assert!(error.message.contains("assertion failed: nope"), "{error}");
+
+        let error = error_of("assert(1)");
+        assert!(
+            error
+                .message
+                .contains("assert() condition must be a bool, got int"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn failing_tests_report_the_test_name_and_line() {
+        let mut env = env_after("test bad_math {\n    assert_eq(1 + 1, 3)\n}");
+        let report = run_tests(&mut env);
+
+        assert_eq!(report.failed(), 1);
+        let error = report.results[0].outcome.as_ref().unwrap_err();
+        assert_eq!(error.line, 2);
+        assert!(error.message.contains("assert_eq failed"), "{error}");
+    }
+
+    #[test]
+    fn duplicate_test_names_are_rejected() {
+        let error = error_of("test same {}\ntest same {}");
+        assert!(error.message.contains("duplicate test 'same'"), "{error}");
+    }
+
+    #[test]
+    fn run_test_file_executes_tests_from_disk() {
+        let (directory, main) = temp_project("tests");
+        fs::write(
+            &main,
+            "def double(x: Int) -> Int { x * 2 }\n\
+             test double_works { assert_eq(double(4), 8) }",
+        )
+        .unwrap();
+
+        let report = run_test_file(main.to_str().unwrap()).unwrap();
+        assert_eq!(report.passed(), 1);
+        assert_eq!(report.failed(), 0);
+
+        drop(directory);
     }
 
     #[test]

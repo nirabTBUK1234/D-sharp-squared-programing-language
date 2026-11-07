@@ -7,15 +7,18 @@ Pythonic (`def`, `if`/`elif`/`else`, `x = 1`, `True`/`False`/`None`, `#`
 comments) but blocks use braces instead of indentation. It has a real lexer and
 recursive-descent parser, functions with defaults and recursion, loops,
 hashsets, hashmaps, matrices, Python-style lists, type-enforced lists,
-Rust-style formatted output, return type annotations, structs with `impl`
-methods, traits and trait-bounded functions, token macros, multifile imports,
-console built-ins, and a REPL.
+Rust-style formatted output, return type annotations, built-in test blocks and
+assertions, structs with `impl` methods, traits and trait-bounded functions,
+token macros, multifile imports, console built-ins, and a REPL.
 
 It is still an early prototype: no namespaced modules, `match`/enums, or
 closures yet — see [Roadmap](#roadmap) and [Known limitations](#known-limitations).
 
-- **v1.5.0** — current release (2026-11-07): return type annotations with
-  `-> Type` on functions and methods, including generic and `List[...]` returns.
+- **v1.6.0** — current release (2026-11-07): Pythonic `test` blocks and
+  `assert` / `assert_eq` / `assert_ne` helpers, run with `--test`.
+- **v1.5.0** — return type annotations with
+  `-> Type` on functions and methods, including generic and `List[...]` returns
+  (2026-11-07).
 - **v1.4.0** — type-enforced lists
   (`List[Int]`), nested typed lists, and Rust-style `print!`/`println!` format
   macros (2026-11-06).
@@ -43,8 +46,9 @@ closures yet — see [Roadmap](#roadmap) and [Known limitations](#known-limitati
 ```bash
 cargo build
 cargo run -- program.dsq   # run a script (any file extension works)
+cargo run -- --test tests.dsq  # run `test` blocks
 cargo run                  # start the REPL
-cargo test                 # run the test suite
+cargo test                 # run the Rust test suite
 ```
 
 """
@@ -249,6 +253,69 @@ print(min([4, 1, 9]))          # 1
 - Arity is checked: `function 'f' takes 2 argument(s), but 3 given`.
 
 A call scope is created per call; there are no closures yet (see limitations).
+
+"""
+
+### Tests
+
+"""
+
+`test name { ... }` or `test "description" { ... }` declares a test. Tests are
+registered when the file runs but only execute in `--test` mode:
+
+```bash
+cargo run -- --test math_tests.dsq
+```
+
+```text
+def min(input: List[Int]) -> Int {
+    lowest = input[0]
+    for i in input[1:] {
+        if i < lowest { lowest = i }
+    }
+    lowest
+}
+
+test min_finds_lowest {
+    assert_eq(min([4, 1, 9, -2]), -2)
+}
+
+test "min handles a single item" {
+    assert_eq(min([7]), 7)
+    assert(1 < 2)
+}
+```
+
+Output:
+
+```text
+running 2 test(s)
+test min_finds_lowest ... ok
+test min handles a single item ... ok
+
+test result: ok. 2 passed; 0 failed
+```
+
+Assertions are ordinary builtins (no `!` suffix):
+
+| Call | Effect |
+|---|---|
+| `assert(condition)` | Fails unless `condition` is `True` |
+| `assert(condition, message)` | Same, with a custom message |
+| `assert_eq(left, right)` | Fails when the values differ, showing both |
+| `assert_eq(left, right, message)` | Same, with a custom message |
+| `assert_ne(left, right)` | Fails when the values are equal |
+
+A failed assertion reports both values and the line:
+
+```text
+test math_works ... FAILED
+  math_tests.dsq:line 12: assert_eq failed: left = 3, right = 4
+```
+
+Each test runs in its own scope, definitions in one test do not leak into
+another, and duplicate test names are rejected. Normal script runs ignore test
+blocks, so a test file can also be imported or executed without running tests.
 
 """
 

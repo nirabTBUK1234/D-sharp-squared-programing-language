@@ -170,6 +170,10 @@ impl Parser {
                 self.advance();
                 self.import_statement(line)
             }
+            TokenKind::Test => {
+                self.advance();
+                self.test_statement(line)
+            }
             TokenKind::Return => {
                 self.advance();
                 self.return_statement(line)
@@ -417,6 +421,34 @@ impl Parser {
             line,
             format!("cannot import '{raw}': tried {tried}"),
         ))
+    }
+
+    fn test_statement(&mut self, line: usize) -> Result<Stmt, Error> {
+        let name = match self.peek().kind.clone() {
+            TokenKind::Text(name) => {
+                self.advance();
+                name
+            }
+            TokenKind::Identifier(name) => {
+                self.advance();
+                name
+            }
+            other => {
+                return Err(Error::new(
+                    line,
+                    format!(
+                        "expected a test name after 'test', found {}",
+                        describe(&other)
+                    ),
+                ));
+            }
+        };
+
+        let body = self.block()?;
+        Ok(Stmt {
+            kind: StmtKind::Test { name, body },
+            line,
+        })
     }
 
     fn function_statement(&mut self, line: usize) -> Result<Stmt, Error> {
@@ -1985,6 +2017,28 @@ mod tests {
         };
         assert_eq!(return_type.as_deref(), Some("List[T]"));
         assert_eq!(type_params[0].name, "T");
+    }
+
+    #[test]
+    fn parses_test_blocks_with_identifier_and_text_names() {
+        let statements = Parser::parse(
+            "test min_works { assert(True) }\n\
+             test \"max works too\" { assert(True) }",
+        )
+        .unwrap();
+
+        assert_eq!(statements.len(), 2);
+
+        let StmtKind::Test { name, body } = &statements[0].kind else {
+            panic!("expected a test block");
+        };
+        assert_eq!(name, "min_works");
+        assert_eq!(body.len(), 1);
+
+        let StmtKind::Test { name, .. } = &statements[1].kind else {
+            panic!("expected a test block");
+        };
+        assert_eq!(name, "max works too");
     }
 
     #[test]

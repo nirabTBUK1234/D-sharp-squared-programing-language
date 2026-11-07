@@ -179,6 +179,12 @@ pub enum StmtKind {
         return_type: Option<String>,
         body: Vec<Stmt>,
     },
+    /// `test name { ... }` or `test "description" { ... }`. Tests are
+    /// registered when the file runs and executed by `--test`.
+    Test {
+        name: String,
+        body: Vec<Stmt>,
+    },
     Return(Option<Expr>),
     If {
         condition: Expr,
