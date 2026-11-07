@@ -32,6 +32,7 @@ pub enum TokenKind {
     GreaterEqual,
     Less,
     LessEqual,
+    Arrow,
     And,
     Or,
     Not,
@@ -115,7 +116,21 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Error> {
             '.' => single(&mut chars, &mut tokens, TokenKind::Dot, token_line),
             '$' => single(&mut chars, &mut tokens, TokenKind::Dollar, token_line),
             '+' => single(&mut chars, &mut tokens, TokenKind::Plus, token_line),
-            '-' => single(&mut chars, &mut tokens, TokenKind::Minus, token_line),
+            '-' => {
+                chars.next();
+                if chars.peek() == Some(&'>') {
+                    chars.next();
+                    tokens.push(Token {
+                        kind: TokenKind::Arrow,
+                        line: token_line,
+                    });
+                } else {
+                    tokens.push(Token {
+                        kind: TokenKind::Minus,
+                        line: token_line,
+                    });
+                }
+            }
             '*' => single(&mut chars, &mut tokens, TokenKind::Star, token_line),
             '/' => single(&mut chars, &mut tokens, TokenKind::Slash, token_line),
             '%' => single(&mut chars, &mut tokens, TokenKind::Percent, token_line),

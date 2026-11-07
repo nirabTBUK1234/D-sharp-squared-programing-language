@@ -48,6 +48,8 @@ pub struct StructField {
 pub struct Method {
     pub name: String,
     pub params: Vec<Parameter>,
+    /// Optional `-> Type` return annotation.
+    pub return_type: Option<String>,
     pub body: Vec<Stmt>,
 }
 
@@ -55,6 +57,8 @@ pub struct Method {
 pub struct TraitMethod {
     pub name: String,
     pub params: Vec<Parameter>,
+    /// Optional `-> Type` return annotation.
+    pub return_type: Option<String>,
     /// `None` means the trait only requires the method; implementations must
     /// provide it. `Some` is a default method.
     pub body: Option<Vec<Stmt>>,
@@ -171,6 +175,8 @@ pub enum StmtKind {
         name: String,
         type_params: Vec<TypeParameter>,
         params: Vec<Parameter>,
+        /// Optional `-> Type` return annotation.
+        return_type: Option<String>,
         body: Vec<Stmt>,
     },
     Return(Option<Expr>),

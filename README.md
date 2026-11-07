@@ -7,16 +7,18 @@ Pythonic (`def`, `if`/`elif`/`else`, `x = 1`, `True`/`False`/`None`, `#`
 comments) but blocks use braces instead of indentation. It has a real lexer and
 recursive-descent parser, functions with defaults and recursion, loops,
 hashsets, hashmaps, matrices, Python-style lists, type-enforced lists,
-Rust-style formatted output, structs with `impl` methods,
-traits and trait-bounded functions, token macros, multifile imports, console
-built-ins, and a REPL.
+Rust-style formatted output, return type annotations, structs with `impl`
+methods, traits and trait-bounded functions, token macros, multifile imports,
+console built-ins, and a REPL.
 
 It is still an early prototype: no namespaced modules, `match`/enums, or
 closures yet — see [Roadmap](#roadmap) and [Known limitations](#known-limitations).
 
-- **v1.4.0** — current release (2026-11-06): type-enforced lists
+- **v1.5.0** — current release (2026-11-07): return type annotations with
+  `-> Type` on functions and methods, including generic and `List[...]` returns.
+- **v1.4.0** — type-enforced lists
   (`List[Int]`), nested typed lists, and Rust-style `print!`/`println!` format
-  macros.
+  macros (2026-11-06).
 - **v1.3.0** — Python-style lists with slicing and
   methods, multifile imports, typed parameters, two-variable hashmap loops, and
   implicit final-expression returns (2026-11-06).
@@ -197,23 +199,32 @@ for ch in "abc" {
 """
 
 ```text
-def greet(name, punctuation = "!") {
+def greet(name: Text, punctuation = "!") -> Text {
     return "Hello, " + name + punctuation
 }
 
-def fact(n: Int) {
+def fact(n: Int) -> Int {
     if n <= 1 { return 1 }
     return n * fact(n - 1)
 }
 
-def double(x: Int) {
+def double(x: Int) -> Int {
     x * 2                    # the final expression is the return value
+}
+
+def min(input: List[Int]) -> Int {
+    lowest = input[0]
+    for i in input[1:] {
+        if i < lowest { lowest = i }
+    }
+    lowest
 }
 
 print(greet("Nirab"))          # Hello, Nirab!
 print(greet("Nirab", "?"))     # Hello, Nirab?
 print(fact(5))                 # 120
 print(double(4))               # 8
+print(min([4, 1, 9]))          # 1
 ```
 
 - Parameters come before the optional defaults; a required parameter may not
@@ -223,6 +234,10 @@ print(double(4))               # 8
   `HashSet`, `HashMap`, and `Matrix`; a struct, trait, or type-parameter name can
   also be used. Annotations are checked when the function is called. Use
   `List[Int]` (or `List[List[Text]]`, and so on) to require one element type.
+- Add `-> Type` after the parameter list to declare a return type:
+  `def max(input: List[Int]) -> Int { ... }`. The returned value, including an
+  implicit final expression, is checked on every call. `-> T` works for generic
+  functions, and `-> List[Int]` promotes a returned untyped list.
 - Defaults are evaluated when the function is called, in the function's scope,
   so they can refer to earlier parameters.
 - `return` ends the function and returns a value. A bare final expression is

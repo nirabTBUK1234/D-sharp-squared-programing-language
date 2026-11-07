@@ -6,6 +6,44 @@ Release history for D#².
 Each release lists the language changes and the notes that matter for users.
 """
 
+## v1.5.0 — 2026-11-07
+
+"""
+Return type annotations.
+"""
+
+### Language
+
+"""
+
+- Functions and methods accept optional `-> Type` after the parameter list:
+  `def max(input: List[Int]) -> Int { ... }`.
+- The returned value is checked at runtime on every call. This includes values
+  from explicit `return`, implicit final expressions, and the implicit `None`
+  returned when a body falls through.
+- Return annotations support the same types as parameters: built-ins, structs,
+  traits, type parameters (`-> T`), and typed lists such as `-> List[Int]`.
+- Generic return types resolve through the function’s type parameters; `-> T`
+  accepts the value produced for the call.
+- Methods in `impl` blocks and trait methods may declare return types. Trait
+  implementations are checked for a matching annotation, and default trait
+  methods enforce their declared return type.
+
+"""
+
+### Notes
+
+"""
+
+- Return types are checked dynamically, not statically, so a mismatched branch
+  reports the error when that branch is executed.
+- A return annotation must name a type, not a variable. `-> input` is rejected
+  as `unknown type annotation 'input'`; write `-> Int` or the intended type.
+- `None` is a valid annotation (`-> None`), and must be written explicitly when
+  a function intentionally returns nothing.
+
+"""
+
 ## v1.4.0 — 2026-11-06
 
 """

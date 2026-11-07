@@ -429,6 +429,7 @@ impl Parser {
         )?;
         let params = self.parameters()?;
         self.check_type_parameters(&type_params, &params, line)?;
+        let return_type = self.return_type_annotation()?;
         let body = with_implicit_return(self.block()?);
 
         Ok(Stmt {
@@ -436,10 +437,21 @@ impl Parser {
                 name,
                 type_params,
                 params,
+                return_type,
                 body,
             },
             line,
         })
+    }
+
+    /// Parses an optional `-> Type` after a function or method parameter list.
+    fn return_type_annotation(&mut self) -> Result<Option<String>, Error> {
+        if !self.match_kind(&TokenKind::Arrow) {
+            return Ok(None);
+        }
+
+        self.skip_newlines();
+        Ok(Some(self.type_annotation()?))
     }
 
     fn type_parameters(&mut self) -> Result<Vec<TypeParameter>, Error> {
@@ -701,10 +713,12 @@ impl Parser {
                 ));
             }
 
+            let return_type = self.return_type_annotation()?;
             let body = with_implicit_return(self.block()?);
             methods.push(Method {
                 name: method_name,
                 params,
+                return_type,
                 body,
             });
             self.skip_separators();
@@ -754,6 +768,7 @@ impl Parser {
 
             // A `{` (on this line or the next) is a default body; otherwise the
             // method is required and the implementation must provide it.
+            let return_type = self.return_type_annotation()?;
             let has_body = self.check(&TokenKind::LeftBrace)
                 || self.next_non_newline_is(&TokenKind::LeftBrace);
             let body = if has_body {
@@ -770,6 +785,7 @@ impl Parser {
             methods.push(TraitMethod {
                 name: method_name,
                 params,
+                return_type,
                 body,
             });
             self.skip_separators();
@@ -1944,6 +1960,31 @@ mod tests {
         };
         assert_eq!(params.len(), 2);
         assert_eq!(params[1].default, Some(Expr::None));
+    }
+
+    #[test]
+    fn parses_return_type_annotations() {
+        let statements = Parser::parse(
+            "def total(values: List[Int]) -> Int { return 0 }\n\
+             def names<T>(value: T) -> List[T] { return [value] }",
+        )
+        .unwrap();
+
+        let StmtKind::Function { return_type, .. } = &statements[0].kind else {
+            panic!("expected a function");
+        };
+        assert_eq!(return_type.as_deref(), Some("Int"));
+
+        let StmtKind::Function {
+            return_type,
+            type_params,
+            ..
+        } = &statements[1].kind
+        else {
+            panic!("expected a function");
+        };
+        assert_eq!(return_type.as_deref(), Some("List[T]"));
+        assert_eq!(type_params[0].name, "T");
     }
 
     #[test]

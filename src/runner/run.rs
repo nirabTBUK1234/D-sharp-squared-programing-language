@@ -59,6 +59,8 @@ pub struct Env {
 struct Function {
     type_params: Vec<TypeParameter>,
     params: Vec<Parameter>,
+    /// Optional `-> Type` return annotation, checked on every call.
+    return_type: Option<String>,
     body: Vec<Stmt>,
     /// File that defined the function, used to label runtime errors.
     file: Option<String>,
@@ -90,6 +92,7 @@ struct TraitDef {
 #[derive(Clone)]
 struct TraitMethodDef {
     params: Vec<Parameter>,
+    return_type: Option<String>,
     body: Option<Vec<Stmt>>,
     file: Option<String>,
 }
@@ -145,12 +148,14 @@ impl Env {
         name: String,
         type_params: Vec<TypeParameter>,
         params: Vec<Parameter>,
+        return_type: Option<String>,
         body: Vec<Stmt>,
         file: Option<String>,
     ) {
         let function = Rc::new(Function {
             type_params,
             params,
+            return_type,
             body,
             file,
         });
@@ -910,6 +915,7 @@ impl<'a> Interpreter<'a> {
                         method.name.clone(),
                         TraitMethodDef {
                             params: method.params.clone(),
+                            return_type: method.return_type.clone(),
                             body: method.body.clone(),
                             file: self.current_file.clone(),
                         },
@@ -930,6 +936,7 @@ impl<'a> Interpreter<'a> {
                             let function = Rc::new(Function {
                                 type_params: Vec::new(),
                                 params: method.params.clone(),
+                                return_type: method.return_type.clone(),
                                 body: method.body.clone(),
                                 file: self.current_file.clone(),
                             });
@@ -985,12 +992,14 @@ impl<'a> Interpreter<'a> {
                 name,
                 type_params,
                 params,
+                return_type,
                 body,
             } => {
                 self.env.define_function(
                     name.clone(),
                     type_params.clone(),
                     params.clone(),
+                    return_type.clone(),
                     body.clone(),
                     self.current_file.clone(),
                 );
@@ -1518,11 +1527,28 @@ impl<'a> Interpreter<'a> {
                 ));
             }
 
+            if let (Some(provided_type), Some(required_type)) =
+                (&method.return_type, &trait_method.return_type)
+                && provided_type != required_type
+            {
+                return Err(Error::new(
+                    line,
+                    format!(
+                        "method '{}' for trait '{trait_name}' must return {required_type}, but returns {provided_type}",
+                        method.name
+                    ),
+                ));
+            }
+
             provided.insert(
                 method.name.clone(),
                 Rc::new(Function {
                     type_params: Vec::new(),
                     params: method.params.clone(),
+                    return_type: method
+                        .return_type
+                        .clone()
+                        .or_else(|| trait_method.return_type.clone()),
                     body: method.body.clone(),
                     file: self.current_file.clone(),
                 }),
@@ -1541,6 +1567,7 @@ impl<'a> Interpreter<'a> {
                     Rc::new(Function {
                         type_params: Vec::new(),
                         params: trait_method.params.clone(),
+                        return_type: trait_method.return_type.clone(),
                         body: body.clone(),
                         file: trait_method.file.clone(),
                     }),
@@ -1699,6 +1726,13 @@ impl<'a> Interpreter<'a> {
         };
 
         self.current_file = saved_file;
+
+        let result = match result {
+            Ok(value) => self
+                .check_return_type(function, &value, line, label)
+                .map(|()| value),
+            Err(error) => Err(error),
+        };
 
         let result = match &function.file {
             Some(file) => result.map_err(|error| error.with_file(file.clone())),
@@ -1930,6 +1964,33 @@ impl<'a> Interpreter<'a> {
                 ),
             ))
         }
+    }
+
+    /// Checks a function or method result against its `-> Type` annotation.
+    fn check_return_type(
+        &self,
+        function: &Function,
+        value: &Value,
+        line: usize,
+        label: &str,
+    ) -> Result<(), Error> {
+        let Some(annotation) = &function.return_type else {
+            return Ok(());
+        };
+
+        let spec = parse_type_spec(annotation).map_err(|message| Error::new(line, message))?;
+        let spec = resolve_type_spec(spec, &function.type_params);
+        self.env
+            .validate_type_spec(&spec)
+            .map_err(|message| Error::new(line, message))?;
+        self.env
+            .ensure_value_matches_spec(value, &spec, line)
+            .map_err(|message| {
+                Error::new(
+                    line,
+                    format!("{label} must return {annotation}: {message}"),
+                )
+            })
     }
 }
 
@@ -3645,6 +3706,120 @@ mod tests {
             "{error}"
         );
         assert_eq!(error.line, 5);
+    }
+
+    #[test]
+    fn functions_support_return_type_annotations() {
+        let env = env_after(
+            "def min(input: List[Int]) -> Int {\n\
+             \x20   lowest = input[0]\n\
+             \x20   for i in input[1:] {\n\
+             \x20       if i < lowest { lowest = i }\n\
+             \x20   }\n\
+             \x20   lowest\n\
+             }\n\
+             def max(input: List[Int]) -> Int {\n\
+             \x20   highest = input[0]\n\
+             \x20   for i in input[1:] {\n\
+             \x20       if i > highest { highest = i }\n\
+             \x20   }\n\
+             \x20   highest\n\
+             }\n\
+             def identity<T>(value: T) -> T { value }\n\
+             def doubles() -> List[Int] { [1, 2, 3] }\n\
+             lowest = min([4, 1, 9, -2])\n\
+             highest = max([4, 1, 9, -2])\n\
+             same = identity(\"text\")\n\
+             values = doubles()\n\
+             values.append(4)",
+        );
+
+        assert_eq!(env.get_value("lowest").unwrap(), Value::Int(-2));
+        assert_eq!(env.get_value("highest").unwrap(), Value::Int(9));
+        assert_eq!(
+            env.get_value("same").unwrap(),
+            Value::Text("text".into())
+        );
+        assert_eq!(env.get_value("values").unwrap().to_string(), "[1, 2, 3, 4]");
+    }
+
+    #[test]
+    fn return_type_errors_are_reported() {
+        let error = error_of("def bad() -> Int { \"text\" }\nbad()");
+        assert!(
+            error
+                .message
+                .contains("function 'bad' must return Int: expected Int, got text"),
+            "{error}"
+        );
+
+        let error = error_of("def bad() -> Int { return \"text\" }\nbad()");
+        assert!(error.message.contains("must return Int"), "{error}");
+
+        let error = error_of("def bad() -> Int { }\nbad()");
+        assert!(error.message.contains("expected Int, got None"), "{error}");
+
+        let error = error_of("def bad() -> Missing { 1 }\nbad()");
+        assert!(
+            error.message.contains("unknown type annotation 'Missing'"),
+            "{error}"
+        );
+
+        let error = error_of(
+            "def bad() -> List[Int] { [1, \"two\"] }\n\
+             bad()",
+        );
+        assert!(
+            error
+                .message
+                .contains("must return List[Int]: list element at index 1"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn methods_support_return_type_annotations() {
+        let env = env_after(
+            "struct Box { value }\n\
+             impl Box {\n\
+             \x20   def get(self) -> Int { self.value }\n\
+             \x20   def label(self) -> Text { return \"box\" }\n\
+             }\n\
+             trait Sized {\n\
+             \x20   def size(self) -> Int\n\
+             }\n\
+             impl Sized for Box {\n\
+             \x20   def size(self) -> Int { self.value }\n\
+             }\n\
+             trait Default {\n\
+             \x20   def zero(self) -> Int { 0 }\n\
+             }\n\
+             impl Default for Box {}\n\
+             b = Box(7)\n\
+             number = b.get()\n\
+             text = b.label()\n\
+             size = b.size()\n\
+             zero = b.zero()",
+        );
+
+        assert_eq!(env.get_value("number").unwrap(), Value::Int(7));
+        assert_eq!(env.get_value("text").unwrap(), Value::Text("box".into()));
+        assert_eq!(env.get_value("size").unwrap(), Value::Int(7));
+        assert_eq!(env.get_value("zero").unwrap(), Value::Int(0));
+
+        let error = error_of(
+            "struct Box { value }\n\
+             trait Sized { def size(self) -> Int }\n\
+             impl Sized for Box {\n\
+             \x20   def size(self) -> Text { \"big\" }\n\
+             }",
+        );
+        assert!(
+            error
+                .message
+                .contains("must return Int, but returns Text"),
+            "{error}"
+        );
     }
 
     #[test]
