@@ -4804,6 +4804,40 @@ mod tests {
     }
 
     #[test]
+    fn if_branches_return_implicitly_as_final_expression() {
+        let env = env_after(
+            "def abs(input: Int) -> Int {\n\
+             \x20   if input =< 0 {\n\
+             \x20       0 - input\n\
+             \x20   }\n\
+             \x20   else {\n\
+             \x20       input\n\
+             \x20   }\n\
+             }\n\
+             def label(score: Int) -> Text {\n\
+             \x20   if score >= 90 {\n\
+             \x20       \"A\"\n\
+             \x20   } elif score >= 80 {\n\
+             \x20       \"B\"\n\
+             \x20   } else {\n\
+             \x20       \"C\"\n\
+             \x20   }\n\
+             }\n\
+             positive = abs(5)\n\
+             negative = abs(-5)\n\
+             high = label(95)\n\
+             middle = label(85)\n\
+             low = label(10)",
+        );
+
+        assert_eq!(env.get_value("positive").unwrap(), Value::Int(5));
+        assert_eq!(env.get_value("negative").unwrap(), Value::Int(5));
+        assert_eq!(env.get_value("high").unwrap(), Value::Text("A".into()));
+        assert_eq!(env.get_value("middle").unwrap(), Value::Text("B".into()));
+        assert_eq!(env.get_value("low").unwrap(), Value::Text("C".into()));
+    }
+
+    #[test]
     fn functions_accept_parameter_type_annotations() {
         let env = env_after(
             "def minimum(x: Int, fallback: Int = 10) {\n\

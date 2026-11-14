@@ -1839,17 +1839,40 @@ fn trim_newlines(tokens: &mut Vec<Token>) {
 
 /// Make the final bare expression in a function or method body its return
 /// value, so `def double(x) { x * 2 }` works without an explicit `return`.
+///
+/// The same rule applies inside the branches when the body ends with an `if`,
+/// so `def abs(x) { if x < 0 { 0 - x } else { x } }` returns the chosen branch.
 fn with_implicit_return(mut statements: Vec<Stmt>) -> Vec<Stmt> {
-    let Some(last) = statements.last_mut() else {
-        return statements;
-    };
-
-    if let StmtKind::Expression(expr) = &mut last.kind {
-        let value = std::mem::replace(expr, Expr::None);
-        last.kind = StmtKind::Return(Some(value));
+    if let Some(last) = statements.last_mut() {
+        with_implicit_return_statement(last);
     }
 
     statements
+}
+
+fn with_implicit_return_statement(statement: &mut Stmt) {
+    match &mut statement.kind {
+        StmtKind::Expression(expr) => {
+            let value = std::mem::replace(expr, Expr::None);
+            statement.kind = StmtKind::Return(Some(value));
+        }
+        StmtKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            if let Some(last) = then_branch.last_mut() {
+                with_implicit_return_statement(last);
+            }
+
+            if let Some(branch) = else_branch
+                && let Some(last) = branch.last_mut()
+            {
+                with_implicit_return_statement(last);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn describe(kind: &TokenKind) -> String {

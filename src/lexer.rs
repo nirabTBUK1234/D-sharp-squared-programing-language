@@ -137,11 +137,20 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Error> {
             '%' => single(&mut chars, &mut tokens, TokenKind::Percent, token_line),
             '=' => {
                 chars.next();
-                let kind = if chars.peek() == Some(&'=') {
-                    chars.next();
-                    TokenKind::Equal
-                } else {
-                    TokenKind::Assign
+                let kind = match chars.peek() {
+                    Some('=') => {
+                        chars.next();
+                        TokenKind::Equal
+                    }
+                    Some('<') => {
+                        chars.next();
+                        TokenKind::LessEqual
+                    }
+                    Some('>') => {
+                        chars.next();
+                        TokenKind::GreaterEqual
+                    }
+                    _ => TokenKind::Assign,
                 };
                 tokens.push(Token {
                     kind,
@@ -413,6 +422,23 @@ mod tests {
                 TokenKind::Else,
                 TokenKind::LeftBrace,
                 TokenKind::RightBrace,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_alternate_ordering_operators() {
+        assert_eq!(
+            kinds("a =< b => c = d"),
+            vec![
+                TokenKind::Identifier("a".into()),
+                TokenKind::LessEqual,
+                TokenKind::Identifier("b".into()),
+                TokenKind::GreaterEqual,
+                TokenKind::Identifier("c".into()),
+                TokenKind::Assign,
+                TokenKind::Identifier("d".into()),
                 TokenKind::Eof,
             ]
         );

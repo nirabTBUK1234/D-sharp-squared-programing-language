@@ -290,7 +290,9 @@ print(min([4, 1, 9]))          # 1
   so they can refer to earlier parameters.
 - `return` ends the function and returns a value. A bare final expression is
   returned implicitly (`def double(x) { x * 2 }`); otherwise falling off the
-  end gives `None`.
+  end gives `None`. If the body ends with an `if`/`elif`/`else`, the final bare
+  expression of the selected branch is returned, so
+  `def abs(x: Int) -> Int { if x < 0 { 0 - x } else { x } }` works.
 - Recursion works (`fact`, `fib`, mutual recursion).
 - A `def` inside a block is still a plain assignment in that scope, so it stays
   visible after the block ends.
@@ -627,7 +629,8 @@ same = 1 == 1.0               # True
 Notes: `and`/`or` require bools; comparisons work on numbers and texts; dividing
 by zero is a runtime error; `1 == 1.0` is true; integer arithmetic is checked,
 so overflow is an error rather than a wrap. `[0] * 3` repeats a list, and
-`2 in [1, 2, 3]` tests membership.
+`2 in [1, 2, 3]` tests membership. The reversed spellings `=<` and `=>` are
+accepted as aliases for `<=` and `>=`.
 
 """
 
