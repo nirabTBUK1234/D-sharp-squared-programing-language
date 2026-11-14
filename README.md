@@ -1143,7 +1143,7 @@ The REPL prints the same format and keeps going.
 | `src/runner/run.rs` | Environments, interpreter, built-ins, REPL |
 | `src/graphics.rs` | `gl.*` OpenGL (SDL2 + glow) and `vk.*` Vulkan (SDL2 + ash) backends |
 | `src/value.rs` | `Value` / `SetItem` types and display rules |
-| `src/builtin_functions.json` | Planned language keyword/built-in → Rust mapping |
+| `src/builtin_functions.json` | Planned keyword/built-in → Rust mapping, each entry marked `DONE` or `TODO` |
 | `.githooks/` | Versioned git hooks that sync `HEAD` to `origin/test` |
 | `.github/workflows/` | CI that mirrors pushed branches to `test` |
 | `scripts/` | Test-branch sync and hook installation scripts |
@@ -1154,7 +1154,8 @@ The REPL prints the same format and keeps going.
 
 """
 
-`builtin_functions.json` lists the intended keyword set. Progress:
+`builtin_functions.json` lists the intended keyword set, with a `status` field
+of `DONE` or `TODO` on every entry. Progress:
 
 - Done, converted to Pythonic syntax: variables (plain assignment + `del`),
   control flow (`if`/`elif`/`else`/`while`/`loop`/`for`/`in`/`break`/`continue`),
