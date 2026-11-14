@@ -68,6 +68,23 @@ cargo run                  # start the REPL
 cargo test                 # run the Rust test suite
 ```
 
+### Test branch automation
+
+Development happens on the `test` branch; `main` stays as the released branch.
+This repository ships versioned git hooks that mirror every commit, merge,
+amend, and rebase to `origin/test`:
+
+```bash
+scripts/install-test-sync.sh   # enable the hooks in a fresh clone
+```
+
+- The automation only pushes `HEAD` to `refs/heads/test`.
+- It never pushes or rewrites `main`.
+- A failed push (offline, no permissions) prints a warning but does not block
+  the commit.
+- Skip one sync with `DSH2_SKIP_TEST_SYNC=1 git commit ...`.
+- Merge `test` into `main` deliberately when a change is ready to release.
+
 """
 
 ## Quick start
@@ -1047,6 +1064,8 @@ The REPL prints the same format and keeps going.
 | `src/graphics.rs` | `gl.*` OpenGL (SDL2 + glow) and `vk.*` Vulkan (SDL2 + ash) backends |
 | `src/value.rs` | `Value` / `SetItem` types and display rules |
 | `src/builtin_functions.json` | Planned language keyword/built-in → Rust mapping |
+| `.githooks/` | Versioned git hooks that sync `HEAD` to `origin/test` |
+| `scripts/` | Test-branch sync and hook installation scripts |
 
 """
 

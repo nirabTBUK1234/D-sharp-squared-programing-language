@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Runs after amend/rebase history rewrites and mirrors HEAD to origin/test.
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+exec "$repo_root/scripts/sync-test-branch.sh"
