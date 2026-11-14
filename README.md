@@ -71,8 +71,18 @@ cargo test                 # run the Rust test suite
 ### Test branch automation
 
 Development happens on the `test` branch; `main` stays as the released branch.
-This repository ships versioned git hooks that mirror every commit, merge,
-amend, and rebase to `origin/test`:
+Two independent mechanisms keep `origin/test` up to date.
+
+**GitHub Actions.** Pushing any branch other than `test` or `main` makes the
+[`Sync test branch`](.github/workflows/sync-test-branch.yml) workflow mirror
+that commit to `test`. `test` is excluded so the mirror never re-triggers, and
+`main` is excluded so a release never rewrites development work. The workflow
+needs only the default `GITHUB_TOKEN` with `contents: write`; it never pushes
+`main`.
+
+**Local hooks.** In a clone where you want immediate syncing, the repository
+also ships versioned git hooks that mirror every commit, merge, amend, and
+rebase to `origin/test`:
 
 ```bash
 scripts/install-test-sync.sh   # enable the hooks in a fresh clone
@@ -742,6 +752,73 @@ same containers.
 
 """
 
+### Conversions
+
+"""
+
+Every value can be converted explicitly with a builtin named after its target
+type. The lowercase names are Pythonic; the capitalized forms are aliases.
+Conversions never guess: a value that cannot sensibly become the target raises
+a clear error instead of being silently coerced.
+
+| Builtin | Aliases | Result |
+|---|---|---|
+| `int(x)` | `Int` | Int; floats truncate toward zero, bools become `1`/`0`, text must be a whole number |
+| `float(x)` | `Float` | Float; ints and bools widen, numeric text is parsed |
+| `bool(x)` | `Bool` | Python-style truthiness for every value |
+| `str(x)` | `text`, `Text` | Text; any value uses its display form, `str()` is `""` |
+| `set(x)` | `hashSet`, `HashSet`, `Set` | Hashset; one iterable argument expands, otherwise items are taken as given |
+| `dict(x)` | `hashMap`, `HashMap`, `Dict` | Hashmap; from a hashmap, matrix, struct, or `[key, value]` pairs |
+| `matrix(x)` | `Matrix`, `mat`, `matrex` | Matrix; from a matrix, nested hashmap, struct, or `[row, cells]` pairs |
+| `list(x)` | — | List; expands text characters or any iterable/container |
+
+```text
+int(3.9)            # 3
+int("42")           # 42
+float("2.5")        # 2.5
+bool([])            # False
+bool([0])           # True
+str(42)             # "42"
+str([1, "two"])     # "[1, \"two\"]"
+
+set([3, 1, 3, 2])   # hashSet(1, 2, 3)
+set("aba")          # hashSet("a", "b")
+dict([["a", 1]])    # {"a": 1}
+matrix({"row1": {"a": 1}})   # mat{row1: {a: 1}}
+```
+
+Calling a conversion with no argument yields the empty value: `int()` is `0`,
+`float()` is `0.0`, `bool()` is `False`, `str()` is `""`, and `set()`, `dict()`,
+`matrix()`, and `list()` are empty.
+
+**Truthiness.** `bool` follows Python: `0`, `0.0`, `""`, empty collections,
+empty matrices, and `None` are false; non-zero numbers, non-empty text, and
+non-empty collections are true. Structs are always true.
+
+**Collections.** With one iterable argument, `set` expands it — lists, hashsets,
+hashmap keys, matrix row names, and text characters. With several arguments,
+each argument becomes one item: `set(1, 2)` is `hashSet(1, 2)`. `dict` accepts a
+hashmap, a matrix (rows become nested hashmaps), a struct (fields become keys),
+or a list of `[key, value]` pairs. `matrix` accepts a matrix, a nested hashmap
+`{row: {cell: value}}`, a struct (one row named after the type), or a list of
+`[row, cells]` pairs where `cells` is a hashmap.
+
+**Errors.** Impossible conversions stop the script with a message naming both
+sides, for example:
+
+```text
+ERROR: line 1: cannot convert text "abc" to Int
+ERROR: line 1: cannot convert list to Float
+ERROR: line 1: cannot convert int to a hashmap
+ERROR: line 1: matrix() row 'row' must be a hashmap
+```
+
+Text conversions tolerate surrounding whitespace, so `int(" 42 ")` is `42`.
+Floats that are not finite or that fall outside the 64-bit Int range are
+rejected by `int`. `dict` and `matrix` take at most one argument.
+
+"""
+
 ### Console
 
 """
@@ -1065,6 +1142,7 @@ The REPL prints the same format and keeps going.
 | `src/value.rs` | `Value` / `SetItem` types and display rules |
 | `src/builtin_functions.json` | Planned language keyword/built-in → Rust mapping |
 | `.githooks/` | Versioned git hooks that sync `HEAD` to `origin/test` |
+| `.github/workflows/` | CI that mirrors pushed branches to `test` |
 | `scripts/` | Test-branch sync and hook installation scripts |
 
 """

@@ -1555,6 +1555,15 @@ impl Parser {
             }
             TokenKind::Matrix => {
                 self.advance();
+
+                if self.match_kind(&TokenKind::LeftParen) {
+                    let args = self.arguments()?;
+                    return Ok(Expr::Call {
+                        callee: Callee::Function("matrix".to_string()),
+                        args,
+                    });
+                }
+
                 self.matrix_literal()
             }
             TokenKind::LeftParen => {

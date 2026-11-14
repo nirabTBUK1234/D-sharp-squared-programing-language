@@ -1,0 +1,54 @@
+name: Sync test branch
+
+# Mirror every pushed development branch to `test`.
+#
+# - `test` is excluded so the mirror never triggers itself.
+# - `main` is excluded so released code never rewrites development work.
+# - The job only ever pushes `refs/heads/test`; `main` is never modified.
+on:
+  push:
+    branches-ignore:
+      - test
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-test-branch
+  cancel-in-progress: true
+
+jobs:
+  mirror:
+    name: Mirror ${{ github.ref_name }} to test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the pushed commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Mirror commit to test
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          git checkout --force -B test "$GITHUB_SHA"
+
+          # Lease against the branch as it exists on the remote, so a direct
+          # push to test is not silently overwritten.
+          if git fetch --no-tags origin \
+              +refs/heads/test:refs/remotes/origin/test 2>/dev/null; then
+            lease="--force-with-lease=refs/heads/test:$(git rev-parse refs/remotes/origin/test)"
+          else
+            lease="--force-with-lease=refs/heads/test:"
+          fi
+
+          git push "$lease" origin HEAD:refs/heads/test

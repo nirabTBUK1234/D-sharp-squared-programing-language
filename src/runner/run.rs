@@ -1478,17 +1478,77 @@ impl<'a> Interpreter<'a> {
                 })?;
                 Ok(Value::Int(length as i64))
             }
-            "hashSet" | "hashset" | "set" => {
-                let mut items = HashSet::new();
-
-                for value in values {
-                    let item = SetItem::from_value(value)
-                        .map_err(|message| Error::new(line, message))?;
-                    items.insert(item);
+            "int" | "Int" => {
+                if values.len() > 1 {
+                    return Err(Error::new(
+                        line,
+                        format!(
+                            "int() takes at most 1 argument, but {} given",
+                            values.len()
+                        ),
+                    ));
                 }
 
-                Ok(Value::HashSet(items))
+                match values.first() {
+                    Some(value) => convert_to_int(value, line),
+                    None => Ok(Value::Int(0)),
+                }
             }
+            "float" | "Float" => {
+                if values.len() > 1 {
+                    return Err(Error::new(
+                        line,
+                        format!(
+                            "float() takes at most 1 argument, but {} given",
+                            values.len()
+                        ),
+                    ));
+                }
+
+                match values.first() {
+                    Some(value) => convert_to_float(value, line),
+                    None => Ok(Value::Float(0.0)),
+                }
+            }
+            "bool" | "Bool" => {
+                if values.len() > 1 {
+                    return Err(Error::new(
+                        line,
+                        format!(
+                            "bool() takes at most 1 argument, but {} given",
+                            values.len()
+                        ),
+                    ));
+                }
+
+                Ok(match values.first() {
+                    Some(value) => convert_to_bool(value),
+                    None => Value::Bool(false),
+                })
+            }
+            "str" | "text" | "Text" => {
+                if values.len() > 1 {
+                    return Err(Error::new(
+                        line,
+                        format!(
+                            "str() takes at most 1 argument, but {} given",
+                            values.len()
+                        ),
+                    ));
+                }
+
+                Ok(match values.first() {
+                    Some(value) => convert_to_text(value),
+                    None => Value::Text(String::new()),
+                })
+            }
+            "hashSet" | "hashset" | "set" | "Set" | "HashSet" => {
+                convert_to_set(values, line)
+            }
+            "dict" | "Dict" | "hashMap" | "hashmap" | "HashMap" => {
+                convert_to_map(values, line)
+            }
+            "matrix" | "Matrix" | "mat" | "matrex" => convert_to_matrix(values, line),
             "assert" => {
                 if values.is_empty() || values.len() > 2 {
                     return Err(Error::new(
@@ -2880,6 +2940,299 @@ fn type_error(action: &str, left: &Value, right: &Value, line: usize) -> Error {
     )
 }
 
+fn convert_to_int(value: &Value, line: usize) -> Result<Value, Error> {
+    match value {
+        Value::Int(number) => Ok(Value::Int(*number)),
+        Value::Float(number) => {
+            let truncated = number.trunc();
+            const MIN: f64 = -9_223_372_036_854_775_808.0;
+            const MAX_EXCLUSIVE: f64 = 9_223_372_036_854_775_808.0;
+
+            if !truncated.is_finite() || truncated < MIN || truncated >= MAX_EXCLUSIVE {
+                Err(Error::new(
+                    line,
+                    format!("cannot convert float {number} to Int: out of range"),
+                ))
+            } else {
+                Ok(Value::Int(truncated as i64))
+            }
+        }
+        Value::Bool(value) => Ok(Value::Int(if *value { 1 } else { 0 })),
+        Value::Text(text) => text
+            .trim()
+            .parse::<i64>()
+            .map(Value::Int)
+            .map_err(|_| {
+                Error::new(
+                    line,
+                    format!("cannot convert text \"{text}\" to Int"),
+                )
+            }),
+        other => Err(Error::new(
+            line,
+            format!("cannot convert {} to Int", other.type_name()),
+        )),
+    }
+}
+
+fn convert_to_float(value: &Value, line: usize) -> Result<Value, Error> {
+    match value {
+        Value::Float(number) => Ok(Value::Float(*number)),
+        Value::Int(number) => Ok(Value::Float(*number as f64)),
+        Value::Bool(value) => Ok(Value::Float(if *value { 1.0 } else { 0.0 })),
+        Value::Text(text) => text
+            .trim()
+            .parse::<f64>()
+            .map(Value::Float)
+            .map_err(|_| {
+                Error::new(
+                    line,
+                    format!("cannot convert text \"{text}\" to Float"),
+                )
+            }),
+        other => Err(Error::new(
+            line,
+            format!("cannot convert {} to Float", other.type_name()),
+        )),
+    }
+}
+
+fn convert_to_bool(value: &Value) -> Value {
+    Value::Bool(match value {
+        Value::Bool(value) => *value,
+        Value::Int(number) => *number != 0,
+        Value::Float(number) => *number != 0.0,
+        Value::Text(text) => !text.is_empty(),
+        Value::List(list) => !list.items.borrow().is_empty(),
+        Value::HashSet(items) => !items.is_empty(),
+        Value::Map(entries) => !entries.is_empty(),
+        Value::Matrix(rows) => !rows.is_empty(),
+        Value::Struct(_) => true,
+        Value::None => false,
+    })
+}
+
+fn convert_to_text(value: &Value) -> Value {
+    Value::Text(value.to_string())
+}
+
+fn convert_to_set(values: Vec<Value>, line: usize) -> Result<Value, Error> {
+    let items = if values.len() == 1 && is_iterable(&values[0]) {
+        iterate(&values[0], line)?
+    } else {
+        values
+    };
+
+    let mut set = HashSet::new();
+    for (index, value) in items.into_iter().enumerate() {
+        let item = SetItem::from_value(value).map_err(|message| {
+            Error::new(line, format!("hashset item {index}: {message}"))
+        })?;
+        set.insert(item);
+    }
+
+    Ok(Value::HashSet(set))
+}
+
+fn set_item_key_text(item: &SetItem) -> String {
+    match item {
+        SetItem::Int(number) => number.to_string(),
+        SetItem::Float(bits) => f64::from_bits(*bits).to_string(),
+        SetItem::Bool(value) => {
+            if *value {
+                "True".to_string()
+            } else {
+                "False".to_string()
+            }
+        }
+        SetItem::Text(text) => text.clone(),
+    }
+}
+
+fn value_key_text(value: &Value, role: &str, line: usize) -> Result<String, Error> {
+    match value {
+        Value::Text(text) => Ok(text.clone()),
+        Value::Int(number) => Ok(number.to_string()),
+        Value::Float(number) => Ok(number.to_string()),
+        Value::Bool(value) => Ok(if *value {
+            "True".to_string()
+        } else {
+            "False".to_string()
+        }),
+        other => Err(Error::new(
+            line,
+            format!(
+                "{role} must be int, float, bool, or text, got {}",
+                other.type_name()
+            ),
+        )),
+    }
+}
+
+fn convert_to_map(values: Vec<Value>, line: usize) -> Result<Value, Error> {
+    if values.len() > 1 {
+        return Err(Error::new(
+            line,
+            format!(
+                "dict() takes at most 1 argument, but {} given",
+                values.len()
+            ),
+        ));
+    }
+
+    let Some(value) = values.into_iter().next() else {
+        return Ok(Value::Map(HashMap::new()));
+    };
+
+    match value {
+        Value::Map(entries) => Ok(Value::Map(entries)),
+        Value::Matrix(rows) => {
+            let mut entries = HashMap::new();
+            for (row_name, cells) in rows {
+                let mut inner = HashMap::new();
+                for (cell_name, cell_value) in cells {
+                    inner.insert(SetItem::Text(cell_name), cell_value);
+                }
+                entries.insert(SetItem::Text(row_name), Value::Map(inner));
+            }
+            Ok(Value::Map(entries))
+        }
+        Value::Struct(struct_value) => {
+            let mut entries = HashMap::new();
+            for (field, field_value) in struct_value.fields {
+                entries.insert(SetItem::Text(field), field_value);
+            }
+            Ok(Value::Map(entries))
+        }
+        Value::List(list) => {
+            let items = list.items.borrow();
+            let mut entries = HashMap::new();
+
+            for (index, item) in items.iter().enumerate() {
+                let Value::List(pair) = item else {
+                    return Err(Error::new(
+                        line,
+                        format!("dict() item {index} must be a [key, value] pair"),
+                    ));
+                };
+
+                let pair = pair.items.borrow();
+                if pair.len() != 2 {
+                    return Err(Error::new(
+                        line,
+                        format!(
+                            "dict() item {index} must have exactly 2 values, got {}",
+                            pair.len()
+                        ),
+                    ));
+                }
+
+                entries.insert(map_key(pair[0].clone(), line)?, pair[1].clone());
+            }
+
+            Ok(Value::Map(entries))
+        }
+        other => Err(Error::new(
+            line,
+            format!("cannot convert {} to a hashmap", other.type_name()),
+        )),
+    }
+}
+
+fn convert_to_matrix(values: Vec<Value>, line: usize) -> Result<Value, Error> {
+    if values.len() > 1 {
+        return Err(Error::new(
+            line,
+            format!(
+                "matrix() takes at most 1 argument, but {} given",
+                values.len()
+            ),
+        ));
+    }
+
+    let Some(value) = values.into_iter().next() else {
+        return Ok(Value::Matrix(HashMap::new()));
+    };
+
+    match value {
+        Value::Matrix(rows) => Ok(Value::Matrix(rows)),
+        Value::Map(entries) => {
+            let mut rows = HashMap::new();
+            for (row_key, row_value) in entries {
+                let Value::Map(cells) = row_value else {
+                    return Err(Error::new(
+                        line,
+                        format!(
+                            "matrix() row '{}' must be a hashmap",
+                            set_item_key_text(&row_key)
+                        ),
+                    ));
+                };
+
+                let mut row = HashMap::new();
+                for (cell_key, cell_value) in cells {
+                    row.insert(set_item_key_text(&cell_key), cell_value);
+                }
+                rows.insert(set_item_key_text(&row_key), row);
+            }
+            Ok(Value::Matrix(rows))
+        }
+        Value::Struct(struct_value) => {
+            let mut row = HashMap::new();
+            for (field, field_value) in struct_value.fields {
+                row.insert(field, field_value);
+            }
+            let mut rows = HashMap::new();
+            rows.insert(struct_value.type_name, row);
+            Ok(Value::Matrix(rows))
+        }
+        Value::List(list) => {
+            let items = list.items.borrow();
+            let mut rows = HashMap::new();
+
+            for (index, item) in items.iter().enumerate() {
+                let Value::List(pair) = item else {
+                    return Err(Error::new(
+                        line,
+                        format!("matrix() item {index} must be a [row, cells] pair"),
+                    ));
+                };
+
+                let pair = pair.items.borrow();
+                if pair.len() != 2 {
+                    return Err(Error::new(
+                        line,
+                        format!(
+                            "matrix() item {index} must have exactly 2 values, got {}",
+                            pair.len()
+                        ),
+                    ));
+                }
+
+                let row_name = value_key_text(&pair[0], "matrix row name", line)?;
+                let Value::Map(cells) = &pair[1] else {
+                    return Err(Error::new(
+                        line,
+                        format!("matrix() row '{row_name}' must be a hashmap"),
+                    ));
+                };
+
+                let mut row = HashMap::new();
+                for (cell_key, cell_value) in cells {
+                    row.insert(set_item_key_text(cell_key), cell_value.clone());
+                }
+                rows.insert(row_name, row);
+            }
+
+            Ok(Value::Matrix(rows))
+        }
+        other => Err(Error::new(
+            line,
+            format!("cannot convert {} to a matrix", other.type_name()),
+        )),
+    }
+}
+
 fn iterate(value: &Value, line: usize) -> Result<Vec<Value>, Error> {
     match value {
         Value::List(list) => Ok(list.items.borrow().clone()),
@@ -4083,6 +4436,208 @@ mod tests {
         assert_eq!(report.failed(), 0);
 
         drop(directory);
+    }
+
+    #[test]
+    fn str_converts_values_to_text() {
+        let env = env_after(
+            "number = str(42)\n\
+             decimal = str(1.5)\n\
+             flag = str(True)\n\
+             nothing = str(None)\n\
+             text = str(\"hi\")\n\
+             items = str([1, \"two\", [3]])\n\
+             empty = str()",
+        );
+
+        assert_eq!(env.get_value("number").unwrap(), Value::Text("42".into()));
+        assert_eq!(env.get_value("decimal").unwrap(), Value::Text("1.5".into()));
+        assert_eq!(env.get_value("flag").unwrap(), Value::Text("True".into()));
+        assert_eq!(env.get_value("nothing").unwrap(), Value::Text("None".into()));
+        assert_eq!(env.get_value("text").unwrap(), Value::Text("hi".into()));
+        assert_eq!(
+            env.get_value("items").unwrap(),
+            Value::Text("[1, \"two\", [3]]".into())
+        );
+        assert_eq!(env.get_value("empty").unwrap(), Value::Text("".into()));
+
+        let error = error_of("str(1, 2)");
+        assert!(
+            error
+                .message
+                .contains("str() takes at most 1 argument, but 2 given"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn numeric_and_bool_conversions() {
+        let env = env_after(
+            "i1 = int(3.9)\n\
+             i2 = int(True)\n\
+             i3 = int(\"42\")\n\
+             i4 = int()\n\
+             i5 = Int(-7.8)\n\
+             f1 = float(7)\n\
+             f2 = float(False)\n\
+             f3 = float(\"2.5\")\n\
+             f4 = float()\n\
+             f5 = Float(\"1e2\")\n\
+             b1 = bool(0)\n\
+             b2 = bool(1)\n\
+             b3 = bool(0.0)\n\
+             b4 = bool(2.5)\n\
+             b5 = bool(\"\")\n\
+             b6 = bool(\"x\")\n\
+             b7 = bool([])\n\
+             b8 = bool([1])\n\
+             b9 = bool({})\n\
+             b10 = bool({\"a\": 1})\n\
+             b11 = bool(None)\n\
+             b12 = bool()\n\
+             b13 = Bool(3)",
+        );
+
+        assert_eq!(env.get_value("i1").unwrap(), Value::Int(3));
+        assert_eq!(env.get_value("i2").unwrap(), Value::Int(1));
+        assert_eq!(env.get_value("i3").unwrap(), Value::Int(42));
+        assert_eq!(env.get_value("i4").unwrap(), Value::Int(0));
+        assert_eq!(env.get_value("i5").unwrap(), Value::Int(-7));
+        assert_eq!(env.get_value("f1").unwrap(), Value::Float(7.0));
+        assert_eq!(env.get_value("f2").unwrap(), Value::Float(0.0));
+        assert_eq!(env.get_value("f3").unwrap(), Value::Float(2.5));
+        assert_eq!(env.get_value("f4").unwrap(), Value::Float(0.0));
+        assert_eq!(env.get_value("f5").unwrap(), Value::Float(100.0));
+        assert_eq!(env.get_value("b1").unwrap(), Value::Bool(false));
+        assert_eq!(env.get_value("b2").unwrap(), Value::Bool(true));
+        assert_eq!(env.get_value("b3").unwrap(), Value::Bool(false));
+        assert_eq!(env.get_value("b4").unwrap(), Value::Bool(true));
+        assert_eq!(env.get_value("b5").unwrap(), Value::Bool(false));
+        assert_eq!(env.get_value("b6").unwrap(), Value::Bool(true));
+        assert_eq!(env.get_value("b7").unwrap(), Value::Bool(false));
+        assert_eq!(env.get_value("b8").unwrap(), Value::Bool(true));
+        assert_eq!(env.get_value("b9").unwrap(), Value::Bool(false));
+        assert_eq!(env.get_value("b10").unwrap(), Value::Bool(true));
+        assert_eq!(env.get_value("b11").unwrap(), Value::Bool(false));
+        assert_eq!(env.get_value("b12").unwrap(), Value::Bool(false));
+        assert_eq!(env.get_value("b13").unwrap(), Value::Bool(true));
+    }
+
+    #[test]
+    fn collection_conversions() {
+        let env = env_after(
+            "letters = list(\"abc\")\n\
+             map_keys = list({\"b\": 2, \"a\": 1})\n\
+             row_names = list(mat{row2: {b: 2}, row1: {a: 1}})\n\
+             numbers = set([3, 1, 3, 2])\n\
+             chars = set(\"aba\")\n\
+             keys = set({\"b\": 2, \"a\": 1})\n\
+             rows = set(mat{row2: {b: 2}, row1: {a: 1}})\n\
+             legacy = hashSet(1, \"x\", 2)\n\
+             pairs = dict([[\"a\", 1], [\"b\", 2]])\n\
+             from_matrix = dict(mat{row1: {a: 1}})\n\
+             struct Point { x y }\n\
+             point = Point(1, 2)\n\
+             from_struct = dict(point)\n\
+             from_map = matrix({\"row1\": {\"a\": 1}})\n\
+             from_pairs = matrix([[\"row1\", {\"a\": 1}]])\n\
+             from_point = matrix(point)\n\
+             alias = Matrix({\"row1\": {\"a\": 1}})",
+        );
+
+        assert_eq!(
+            env.get_value("letters").unwrap().to_string(),
+            "[\"a\", \"b\", \"c\"]"
+        );
+        assert_eq!(
+            env.get_value("map_keys").unwrap().to_string(),
+            "[\"a\", \"b\"]"
+        );
+        assert_eq!(
+            env.get_value("row_names").unwrap().to_string(),
+            "[\"row1\", \"row2\"]"
+        );
+        assert_eq!(env.get_value("numbers").unwrap().to_string(), "hashSet(1, 2, 3)");
+        assert_eq!(env.get_value("chars").unwrap().to_string(), "hashSet(\"a\", \"b\")");
+        assert_eq!(env.get_value("keys").unwrap().to_string(), "hashSet(\"a\", \"b\")");
+        assert_eq!(
+            env.get_value("rows").unwrap().to_string(),
+            "hashSet(\"row1\", \"row2\")"
+        );
+        assert_eq!(
+            env.get_value("legacy").unwrap().to_string(),
+            "hashSet(\"x\", 1, 2)"
+        );
+        assert_eq!(
+            env.get_value("pairs").unwrap().to_string(),
+            "{\"a\": 1, \"b\": 2}"
+        );
+        assert_eq!(
+            env.get_value("from_matrix").unwrap().to_string(),
+            "{\"row1\": {\"a\": 1}}"
+        );
+        assert_eq!(
+            env.get_value("from_struct").unwrap().to_string(),
+            "{\"x\": 1, \"y\": 2}"
+        );
+        assert_eq!(
+            env.get_value("from_map").unwrap().to_string(),
+            "mat{row1: {a: 1}}"
+        );
+        assert_eq!(
+            env.get_value("from_pairs").unwrap().to_string(),
+            "mat{row1: {a: 1}}"
+        );
+        assert_eq!(
+            env.get_value("from_point").unwrap().to_string(),
+            "mat{Point: {x: 1, y: 2}}"
+        );
+        assert_eq!(
+            env.get_value("alias").unwrap().to_string(),
+            "mat{row1: {a: 1}}"
+        );
+    }
+
+    #[test]
+    fn conversion_errors_are_clear() {
+        let error = error_of("int(\"abc\")");
+        assert!(
+            error.message.contains("cannot convert text \"abc\" to Int"),
+            "{error}"
+        );
+
+        let error = error_of("int(float(\"inf\"))");
+        assert!(error.message.contains("out of range"), "{error}");
+
+        let error = error_of("float([1])");
+        assert!(
+            error.message.contains("cannot convert list to Float"),
+            "{error}"
+        );
+
+        let error = error_of("dict(1)");
+        assert!(
+            error.message.contains("cannot convert int to a hashmap"),
+            "{error}"
+        );
+
+        let error = error_of("dict([[1, 2, 3]])");
+        assert!(
+            error.message.contains("must have exactly 2 values"),
+            "{error}"
+        );
+
+        let error = error_of("matrix([[\"row\", 1]])");
+        assert!(
+            error.message.contains("row 'row' must be a hashmap"),
+            "{error}"
+        );
+
+        let error = error_of("int(1, 2)");
+        assert!(
+            error.message.contains("int() takes at most 1 argument"),
+            "{error}"
+        );
     }
 
     #[test]
