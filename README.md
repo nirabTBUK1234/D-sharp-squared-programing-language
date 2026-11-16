@@ -9,7 +9,8 @@ recursive-descent parser, functions with defaults and recursion, loops,
 hashsets, hashmaps, matrices, Python-style lists, type-enforced lists,
 Rust-style formatted output, return type annotations, built-in test blocks and
 assertions, structs with `impl` methods, traits and trait-bounded functions,
-token macros, multifile imports, console and file built-ins, desktop graphics,
+token macros, multifile imports, console and file built-ins, value
+conversions, Rust-style ranges, union type annotations, desktop graphics,
 and a REPL.
 
 It is still an early prototype: no namespaced modules, `match`/enums, or
@@ -1172,6 +1173,8 @@ of `DONE` or `TODO` on every entry. Progress:
   `hashSet`, `hashMap`, `Matrix`, and related aliases).
 - Done: file objects from `file(path)` with `read`, `write`, `append`, `delete`,
   `copy`, `rename`, `exists`, `create`, and `size`.
+- Done: Rust-style ranges (`start..end`, `start..=end`), union type annotations
+  (`Int or Float`), and the `**` exponentiation operator.
 - Done: desktop graphics through `gl.*` (OpenGL 3.3 core, including shaders,
   buffers, vertex arrays, draws, and uniforms) and `vk.*` (Vulkan window,
   swapchain, clear, and present).
@@ -1205,8 +1208,8 @@ of `DONE` or `TODO` on every entry. Progress:
   variables. There are no closures and no first-class function values yet.
 - No named/keyword arguments at call sites; defaults are positional. In
   particular, `list.sort()` has no `key=` or `reverse=` arguments.
-- No list comprehensions, tuple unpacking (`a, b = [1, 2]`), or range objects;
-  build lists with literals, `list(iterable)`, loops, and `append`/`extend`.
+- No list comprehensions or tuple unpacking (`a, b = [1, 2]`); build lists with
+  literals, `list(iterable)`, loops, and `append`/`extend`.
 - Lists support equality and membership, but ordering comparisons such as
   `[1] < [2]` are not implemented.
 - Macros are textual and unhygienic; they only expand in statement position and

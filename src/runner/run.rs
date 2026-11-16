@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     error::Error as StdError,
-    fs,
+    fs::{self, OpenOptions},
     io::{self, BufRead, Write},
     path::Path,
     rc::Rc,
@@ -1549,6 +1549,20 @@ impl<'a> Interpreter<'a> {
                 convert_to_map(values, line)
             }
             "matrix" | "Matrix" | "mat" | "matrex" => convert_to_matrix(values, line),
+            "file" | "File" => {
+                if values.len() != 1 {
+                    return Err(Error::new(
+                        line,
+                        format!("file(path) takes 1 argument, but {} given", values.len()),
+                    ));
+                }
+
+                let path = file_text_arg("file", &values[0], line)?;
+                Ok(Value::Struct(StructValue {
+                    type_name: "File".to_string(),
+                    fields: HashMap::from([("path".to_string(), Value::Text(path))]),
+                }))
+            }
             "assert" => {
                 if values.is_empty() || values.len() > 2 {
                     return Err(Error::new(
@@ -1668,6 +1682,12 @@ impl<'a> Interpreter<'a> {
             }
         };
 
+        // A user-defined `File` struct takes precedence over the built-in file
+        // object, so scripts remain free to define their own type with that name.
+        if struct_value.type_name == "File" && self.env.get_struct("File").is_none() {
+            return self.call_file_method(struct_value, receiver_name, method, values, line);
+        }
+
         let definition = self
             .env
             .get_struct(&struct_value.type_name)
@@ -1700,6 +1720,116 @@ impl<'a> Interpreter<'a> {
         }
 
         Ok(result)
+    }
+
+    /// File objects are created by `file(path)` and expose the operations
+    /// listed in `builtin_functions.json` under `file system`.
+    fn call_file_method(
+        &mut self,
+        mut file: StructValue,
+        receiver_name: Option<&str>,
+        method: &str,
+        values: Vec<Value>,
+        line: usize,
+    ) -> Result<Value, Error> {
+        let path = file_path(&file, line)?;
+
+        match method {
+            "read" => {
+                expect_arity("file.read", &values, 0, line)?;
+                let text = fs::read_to_string(&path)
+                    .map_err(|error| file_error("read", &path, error, line))?;
+                Ok(Value::Text(text))
+            }
+            "write" => {
+                expect_arity("file.write", &values, 1, line)?;
+                let data = file_text_arg("file.write", &values[0], line)?;
+                fs::write(&path, data.as_bytes())
+                    .map_err(|error| file_error("write", &path, error, line))?;
+                Ok(Value::None)
+            }
+            "append" => {
+                expect_arity("file.append", &values, 1, line)?;
+                let data = file_text_arg("file.append", &values[0], line)?;
+                let mut handle = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                    .map_err(|error| file_error("append", &path, error, line))?;
+                handle
+                    .write_all(data.as_bytes())
+                    .map_err(|error| file_error("append", &path, error, line))?;
+                Ok(Value::None)
+            }
+            "delete" => {
+                expect_arity("file.delete", &values, 0, line)?;
+                fs::remove_file(&path)
+                    .map_err(|error| file_error("delete", &path, error, line))?;
+                Ok(Value::None)
+            }
+            "copy" => {
+                expect_arity("file.copy", &values, 1, line)?;
+                let destination = file_text_arg("file.copy", &values[0], line)?;
+                let copied = fs::copy(&path, &destination).map_err(|error| {
+                    Error::new(
+                        line,
+                        format!(
+                            "file.copy() failed for '{path}' -> '{destination}': {error}"
+                        ),
+                    )
+                })?;
+                let copied = i64::try_from(copied).map_err(|_| {
+                    Error::new(line, "file.copy(): copied size does not fit in Int")
+                })?;
+                Ok(Value::Int(copied))
+            }
+            "rename" => {
+                expect_arity("file.rename", &values, 1, line)?;
+                let destination = file_text_arg("file.rename", &values[0], line)?;
+                fs::rename(&path, &destination).map_err(|error| {
+                    Error::new(
+                        line,
+                        format!(
+                            "file.rename() failed for '{path}' -> '{destination}': {error}"
+                        ),
+                    )
+                })?;
+
+                // Keep the receiver usable after a rename.
+                file.fields
+                    .insert("path".to_string(), Value::Text(destination));
+                if let Some(name) = receiver_name {
+                    self.env.assign(name, Value::Struct(file));
+                }
+
+                Ok(Value::None)
+            }
+            "exists" => {
+                expect_arity("file.exists", &values, 0, line)?;
+                Ok(Value::Bool(Path::new(&path).exists()))
+            }
+            "create" => {
+                expect_arity("file.create", &values, 0, line)?;
+                fs::File::create(&path)
+                    .map_err(|error| file_error("create", &path, error, line))?;
+                Ok(Value::None)
+            }
+            "size" => {
+                expect_arity("file.size", &values, 0, line)?;
+                let size = fs::metadata(&path)
+                    .map_err(|error| file_error("size", &path, error, line))?
+                    .len();
+                let size = i64::try_from(size)
+                    .map_err(|_| Error::new(line, "file.size(): size does not fit in Int"))?;
+                Ok(Value::Int(size))
+            }
+            _ => Err(Error::new(
+                line,
+                format!(
+                    "unknown file method 'file.{method}' (available: file.read, file.write, file.append, file.delete, file.copy, file.rename, file.exists, file.create, file.size)"
+                ),
+            )),
+        }
     }
 
     fn implement_trait(
@@ -2527,6 +2657,31 @@ fn expect_arity(label: &str, args: &[Value], expected: usize, line: usize) -> Re
         ));
     }
     Ok(())
+}
+
+fn file_text_arg(label: &str, value: &Value, line: usize) -> Result<String, Error> {
+    match value {
+        Value::Text(text) => Ok(text.clone()),
+        other => Err(Error::new(
+            line,
+            format!("{label}() expects text, got {}", other.type_name()),
+        )),
+    }
+}
+
+fn file_path(file: &StructValue, line: usize) -> Result<String, Error> {
+    match file.fields.get("path") {
+        Some(Value::Text(path)) => Ok(path.clone()),
+        Some(other) => Err(Error::new(
+            line,
+            format!("File path must be text, got {}", other.type_name()),
+        )),
+        None => Err(Error::new(line, "File has no path")),
+    }
+}
+
+fn file_error(action: &str, path: &str, error: io::Error, line: usize) -> Error {
+    Error::new(line, format!("file.{action}() failed for '{path}': {error}"))
 }
 
 fn int_arg(label: &str, value: &Value, line: usize) -> Result<i64, Error> {
@@ -4835,6 +4990,84 @@ mod tests {
         assert_eq!(env.get_value("high").unwrap(), Value::Text("A".into()));
         assert_eq!(env.get_value("middle").unwrap(), Value::Text("B".into()));
         assert_eq!(env.get_value("low").unwrap(), Value::Text("C".into()));
+    }
+
+    #[test]
+    fn file_builtins_read_write_and_manage_files() {
+        let (directory, _) = temp_project("file_ops");
+        let path = directory.join("notes.txt");
+        let backup = directory.join("backup.txt");
+        let renamed = directory.join("renamed.txt");
+
+        let source = format!(
+            "f = file({path:?})\n\
+             f.create()\n\
+             f.write(\"hello\")\n\
+             f.append(\" world\")\n\
+             text = f.read()\n\
+             size = f.size()\n\
+             exists = f.exists()\n\
+             copied_bytes = f.copy({backup:?})\n\
+             copied = file({backup:?}).read()\n\
+             f.rename({renamed:?})\n\
+             renamed_text = f.read()\n\
+             old_exists = file({path:?}).exists()\n\
+             f.delete()\n\
+             gone = f.exists()",
+            path = path.display().to_string(),
+            backup = backup.display().to_string(),
+            renamed = renamed.display().to_string(),
+        );
+
+        let env = env_after(&source);
+
+        assert_eq!(env.get_value("text").unwrap(), Value::Text("hello world".into()));
+        assert_eq!(env.get_value("size").unwrap(), Value::Int(11));
+        assert_eq!(env.get_value("exists").unwrap(), Value::Bool(true));
+        assert_eq!(env.get_value("copied_bytes").unwrap(), Value::Int(11));
+        assert_eq!(
+            env.get_value("copied").unwrap(),
+            Value::Text("hello world".into())
+        );
+        assert_eq!(
+            env.get_value("renamed_text").unwrap(),
+            Value::Text("hello world".into())
+        );
+        assert_eq!(env.get_value("old_exists").unwrap(), Value::Bool(false));
+        assert_eq!(env.get_value("gone").unwrap(), Value::Bool(false));
+
+        assert!(!renamed.exists());
+        assert!(backup.exists());
+        assert!(!path.exists());
+
+        fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn file_builtin_errors_are_clear() {
+        let error = error_of("file(1)");
+        assert!(
+            error.message.contains("file() expects text, got int"),
+            "{error}"
+        );
+
+        let error = error_of("file(\"/tmp/dsh2_missing_file_for_test\").read()");
+        assert!(
+            error.message.contains("file.read() failed for"),
+            "{error}"
+        );
+
+        let error = error_of("f = file(\"/tmp/dsh2_write_type_test\")\nf.write(1)");
+        assert!(
+            error.message.contains("file.write() expects text, got int"),
+            "{error}"
+        );
+
+        let error = error_of("file(\"/tmp/dsh2_method_test\").nope()");
+        assert!(
+            error.message.contains("unknown file method 'file.nope'"),
+            "{error}"
+        );
     }
 
     #[test]

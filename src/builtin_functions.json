@@ -16,15 +16,16 @@
         },
 
         "file system": {
-            "file.read()": { "rust": "fs::read_to_string(self)", "status": "TODO" },
-            "file.write(data)": { "rust": "fs::write(self, data)", "status": "TODO" },
-            "file.append(data)": { "rust": "OpenOptions::append(self, data)", "status": "TODO" },
-            "file.delete()": { "rust": "fs::remove_file(self)", "status": "TODO" },
-            "file.copy(dest)": { "rust": "fs::copy(self, dest)", "status": "TODO" },
-            "file.rename(new)": { "rust": "fs::rename(self, new)", "status": "TODO" },
-            "file.exists()": { "rust": "Path::exists(self)", "status": "TODO" },
-            "file.create()": { "rust": "File::create(self)", "status": "TODO" },
-            "file.size()": { "rust": "fs::metadata(self).len()", "status": "TODO" }
+            "file(path)": { "rust": "File::new(path)", "status": "DONE", "note": "creates a File object" },
+            "file.read()": { "rust": "fs::read_to_string(self)", "status": "DONE" },
+            "file.write(data)": { "rust": "fs::write(self, data)", "status": "DONE" },
+            "file.append(data)": { "rust": "OpenOptions::append(self, data)", "status": "DONE" },
+            "file.delete()": { "rust": "fs::remove_file(self)", "status": "DONE" },
+            "file.copy(dest)": { "rust": "fs::copy(self, dest)", "status": "DONE" },
+            "file.rename(new)": { "rust": "fs::rename(self, new)", "status": "DONE" },
+            "file.exists()": { "rust": "Path::exists(self)", "status": "DONE" },
+            "file.create()": { "rust": "File::create(self)", "status": "DONE" },
+            "file.size()": { "rust": "fs::metadata(self).len()", "status": "DONE" }
         },
 
         "graphics": {
