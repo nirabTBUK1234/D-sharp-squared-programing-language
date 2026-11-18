@@ -637,6 +637,7 @@ Lowest to highest precedence:
 | `+`, `-` | Addition/subtraction; `+` also joins two texts or concatenates two lists |
 | `*`, `/`, `%` | Multiplication, division, remainder |
 | `not`, `!`, unary `-` | Logical not, numeric negation |
+| `**` | Exponentiation (right-associative) |
 
 ```text
 arithmetic = 1 + 2 * 3        # 7
@@ -644,12 +645,17 @@ compare = 1 > 2               # False
 logic = True and not False    # True
 joined = "a" + "b"            # "ab"
 same = 1 == 1.0               # True
+power = 2 ** 10               # 1024
+root = 9 ** 0.5               # 3
 ```
 
 Notes: `and`/`or` require bools; comparisons work on numbers and texts; dividing
 by zero is a runtime error; `1 == 1.0` is true; integer arithmetic is checked,
-so overflow is an error rather than a wrap. `[0] * 3` repeats a list, and
-`2 in [1, 2, 3]` tests membership. The reversed spellings `=<` and `=>` are
+so overflow is an error rather than a wrap. `**` binds tighter than unary
+minus, so `-2 ** 2` is `-4`, and it is right-associative, so
+`2 ** 3 ** 2` is `512`. Integer bases stay Int for non-negative integer
+exponents; negative exponents and floats produce a Float. `[0] * 3` repeats a
+list, and `2 in [1, 2, 3]` tests membership. The reversed spellings `=<` and `=>` are
 accepted as aliases for `<=` and `>=`.
 
 """

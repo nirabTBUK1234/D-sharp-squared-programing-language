@@ -292,6 +292,7 @@
             "greater_equal": { "rust": ">=", "status": "DONE", "note": ">= operator" },
             "less_equal": { "rust": "<=", "status": "DONE", "note": "<= operator" },
             "range": { "rust": ".. / ..=", "status": "DONE", "note": "exclusive and inclusive ranges" },
+            "power": { "rust": ".powi() / .powf()", "status": "DONE", "note": "** operator" },
             "assign": { "rust": "=", "status": "DONE", "note": "= operator" }
         },
 

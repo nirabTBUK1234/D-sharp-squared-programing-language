@@ -1400,7 +1400,24 @@ impl Parser {
             });
         }
 
-        self.postfix_expression()
+        self.power_expression()
+    }
+
+    /// `**` binds tighter than unary minus and is right-associative, so
+    /// `-2 ** 2` is `-(2 ** 2)` and `2 ** 3 ** 2` is `2 ** (3 ** 2)`.
+    fn power_expression(&mut self) -> Result<Expr, Error> {
+        let left = self.postfix_expression()?;
+
+        if self.match_kind(&TokenKind::StarStar) {
+            let right = self.unary_expression()?;
+            return Ok(Expr::Binary {
+                op: BinaryOp::Power,
+                left: Box::new(left),
+                right: Box::new(right),
+            });
+        }
+
+        Ok(left)
     }
 
     fn postfix_expression(&mut self) -> Result<Expr, Error> {
@@ -1982,6 +1999,42 @@ mod tests {
             *right,
             Expr::Binary {
                 op: BinaryOp::Greater,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn power_is_right_associative_and_binds_tighter_than_unary_minus() {
+        let expr = expression_of("2 ** 3 ** 2");
+        let Expr::Binary {
+            op: BinaryOp::Power,
+            right,
+            ..
+        } = expr
+        else {
+            panic!("expected a power expression");
+        };
+        assert!(matches!(
+            *right,
+            Expr::Binary {
+                op: BinaryOp::Power,
+                ..
+            }
+        ));
+
+        let expr = expression_of("-2 ** 2");
+        let Expr::Unary {
+            op: UnaryOp::Neg,
+            expr,
+        } = expr
+        else {
+            panic!("expected a negated power expression");
+        };
+        assert!(matches!(
+            *expr,
+            Expr::Binary {
+                op: BinaryOp::Power,
                 ..
             }
         ));

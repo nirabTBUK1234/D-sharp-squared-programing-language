@@ -3059,6 +3059,7 @@ fn binary_op(op: BinaryOp, left: Value, right: Value, line: usize) -> Result<Val
         BinaryOp::Subtract | BinaryOp::Multiply | BinaryOp::Divide | BinaryOp::Remainder => {
             arithmetic(op, left, right, line)
         }
+        BinaryOp::Power => power(left, right, line),
         BinaryOp::And | BinaryOp::Or => unreachable!("and/or are evaluated with short-circuiting"),
     }
 }
@@ -3158,6 +3159,68 @@ fn repeat_list(list: &Rc<ListValue>, count: i64) -> Result<Value, Error> {
         Some(element_type) => Value::typed_list(result, element_type),
         None => Value::list(result),
     })
+}
+
+/// Python-style `**`: integer bases stay integers for non-negative integer
+/// exponents, and any other combination produces a float.
+fn power(left: Value, right: Value, line: usize) -> Result<Value, Error> {
+    match (&left, &right) {
+        (Value::Int(base), Value::Int(exponent)) => {
+            if *exponent < 0 {
+                return float_power(*base as f64, *exponent as f64, line);
+            }
+
+            if *exponent == 0 {
+                return Ok(Value::Int(1));
+            }
+
+            match *base {
+                0 => return Ok(Value::Int(0)),
+                1 => return Ok(Value::Int(1)),
+                -1 => {
+                    return Ok(Value::Int(if exponent % 2 == 0 { 1 } else { -1 }));
+                }
+                _ => {}
+            }
+
+            let exponent = u32::try_from(*exponent).map_err(|_| {
+                Error::new(
+                    line,
+                    format!("integer exponent {exponent} is too large"),
+                )
+            })?;
+
+            base.checked_pow(exponent)
+                .map(Value::Int)
+                .ok_or_else(|| Error::new(line, "integer overflow"))
+        }
+        _ => match float_pair(&left, &right) {
+            Some((base, exponent)) => float_power(base, exponent, line),
+            None => Err(type_error("raise", &left, &right, line)),
+        },
+    }
+}
+
+fn float_power(base: f64, exponent: f64, line: usize) -> Result<Value, Error> {
+    if base == 0.0 && exponent < 0.0 {
+        return Err(Error::new(line, "cannot raise zero to a negative power"));
+    }
+
+    if base < 0.0 && exponent.fract() != 0.0 {
+        return Err(Error::new(
+            line,
+            "cannot raise a negative number to a fractional power",
+        ));
+    }
+
+    let result = base.powf(exponent);
+    if result.is_nan() {
+        Err(Error::new(line, "power result is not a number"))
+    } else if result.is_infinite() {
+        Err(Error::new(line, "power result is out of range"))
+    } else {
+        Ok(Value::Float(result))
+    }
 }
 
 fn arithmetic(op: BinaryOp, left: Value, right: Value, line: usize) -> Result<Value, Error> {
@@ -3990,6 +4053,52 @@ mod tests {
         let env = env_after("x = 1\nx = x + 2\ny = x * 10");
         assert_eq!(env.get_value("x").unwrap(), Value::Int(3));
         assert_eq!(env.get_value("y").unwrap(), Value::Int(30));
+    }
+
+    #[test]
+    fn power_operator_supports_ints_floats_and_negative_exponents() {
+        let env = env_after(
+            "squared = 5 ** 2\n\
+             fractional = 2 ** 0.1\n\
+             root = 9 ** 0.5\n\
+             negative = 2 ** -2\n\
+             right_associative = 2 ** 3 ** 2\n\
+             unary = -2 ** 2\n\
+             zero = 0 ** 0\n\
+             mixed = 2.0 ** 3",
+        );
+
+        assert_eq!(env.get_value("squared").unwrap(), Value::Int(25));
+        assert_eq!(
+            env.get_value("fractional").unwrap(),
+            Value::Float(2f64.powf(0.1))
+        );
+        assert_eq!(env.get_value("root").unwrap(), Value::Float(3.0));
+        assert_eq!(env.get_value("negative").unwrap(), Value::Float(0.25));
+        assert_eq!(
+            env.get_value("right_associative").unwrap(),
+            Value::Int(512)
+        );
+        assert_eq!(env.get_value("unary").unwrap(), Value::Int(-4));
+        assert_eq!(env.get_value("zero").unwrap(), Value::Int(1));
+        assert_eq!(env.get_value("mixed").unwrap(), Value::Float(8.0));
+
+        let error = error_of("\"a\" ** 2");
+        assert!(error.message.contains("cannot raise text and int"), "{error}");
+
+        let error = error_of("(-8) ** 0.5");
+        assert!(
+            error
+                .message
+                .contains("cannot raise a negative number to a fractional power"),
+            "{error}"
+        );
+
+        let error = error_of("0 ** -1");
+        assert!(
+            error.message.contains("cannot raise zero to a negative power"),
+            "{error}"
+        );
     }
 
     #[test]

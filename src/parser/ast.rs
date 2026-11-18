@@ -21,6 +21,7 @@ pub enum BinaryOp {
     Multiply,
     Divide,
     Remainder,
+    Power,
 }
 
 #[derive(Clone, Debug, PartialEq)]

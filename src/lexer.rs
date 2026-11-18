@@ -25,6 +25,7 @@ pub enum TokenKind {
     Plus,
     Minus,
     Star,
+    StarStar,
     Slash,
     Percent,
     Assign,
@@ -151,7 +152,19 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Error> {
                     });
                 }
             }
-            '*' => single(&mut chars, &mut tokens, TokenKind::Star, token_line),
+            '*' => {
+                chars.next();
+                let kind = if chars.peek() == Some(&'*') {
+                    chars.next();
+                    TokenKind::StarStar
+                } else {
+                    TokenKind::Star
+                };
+                tokens.push(Token {
+                    kind,
+                    line: token_line,
+                });
+            }
             '/' => single(&mut chars, &mut tokens, TokenKind::Slash, token_line),
             '%' => single(&mut chars, &mut tokens, TokenKind::Percent, token_line),
             '=' => {
@@ -482,6 +495,19 @@ mod tests {
                 TokenKind::DotDotEqual,
                 TokenKind::Int(3),
                 TokenKind::Float(2.5),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_power_operator() {
+        assert_eq!(
+            kinds("2**0.1"),
+            vec![
+                TokenKind::Int(2),
+                TokenKind::StarStar,
+                TokenKind::Float(0.1),
                 TokenKind::Eof,
             ]
         );
