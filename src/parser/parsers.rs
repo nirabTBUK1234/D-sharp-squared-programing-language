@@ -1267,7 +1267,7 @@ impl Parser {
     }
 
     fn comparison_expression(&mut self) -> Result<Expr, Error> {
-        let mut left = self.additive_expression()?;
+        let mut left = self.range_expression()?;
 
         loop {
             let op = if self.match_kind(&TokenKind::Greater) {
@@ -1288,7 +1288,7 @@ impl Parser {
                 break;
             };
 
-            let right = self.additive_expression()?;
+            let right = self.range_expression()?;
             left = Expr::Binary {
                 op,
                 left: Box::new(left),
@@ -1297,6 +1297,28 @@ impl Parser {
         }
 
         Ok(left)
+    }
+
+    /// `start..end` and `start..=end` bind tighter than comparisons so that
+    /// `if n in 0..5` reads naturally, but looser than arithmetic so that
+    /// `0..n + 1` means `0..(n + 1)`.
+    fn range_expression(&mut self) -> Result<Expr, Error> {
+        let start = self.additive_expression()?;
+
+        let inclusive = if self.match_kind(&TokenKind::DotDot) {
+            false
+        } else if self.match_kind(&TokenKind::DotDotEqual) {
+            true
+        } else {
+            return Ok(start);
+        };
+
+        let end = self.additive_expression()?;
+        Ok(Expr::Range {
+            start: Box::new(start),
+            end: Box::new(end),
+            inclusive,
+        })
     }
 
     fn additive_expression(&mut self) -> Result<Expr, Error> {
@@ -1946,6 +1968,39 @@ mod tests {
             *right,
             Expr::Binary {
                 op: BinaryOp::Greater,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn ranges_bind_tighter_than_membership_and_looser_than_addition() {
+        let expr = expression_of("n in 1..limit + 1");
+
+        let Expr::Binary {
+            op: BinaryOp::In,
+            right,
+            ..
+        } = expr
+        else {
+            panic!("expected a membership test");
+        };
+
+        let Expr::Range {
+            start,
+            end,
+            inclusive,
+        } = *right
+        else {
+            panic!("expected a range on the right of 'in'");
+        };
+
+        assert!(!inclusive);
+        assert!(matches!(*start, Expr::Int(1)));
+        assert!(matches!(
+            *end,
+            Expr::Binary {
+                op: BinaryOp::Add,
                 ..
             }
         ));

@@ -627,6 +627,7 @@ impl Env {
             }
             TypeSpec::HashMap => ensure_simple(value, spec, line, matches!(value, Value::Map(_))),
             TypeSpec::Matrix => ensure_simple(value, spec, line, matches!(value, Value::Matrix(_))),
+            TypeSpec::Range => ensure_simple(value, spec, line, matches!(value, Value::Range { .. })),
             TypeSpec::List(None) => {
                 ensure_simple(value, spec, line, matches!(value, Value::List(_)))
             }
@@ -804,6 +805,7 @@ fn parse_type_spec(text: &str) -> Result<TypeSpec, String> {
         "hashset" | "set" => TypeSpec::HashSet,
         "hashmap" | "map" => TypeSpec::HashMap,
         "matrix" | "mat" => TypeSpec::Matrix,
+        "range" => TypeSpec::Range,
         _ => TypeSpec::Named(text.to_string()),
     })
 }
@@ -872,6 +874,7 @@ fn is_iterable(value: &Value) -> bool {
             | Value::HashSet(_)
             | Value::Map(_)
             | Value::Matrix(_)
+            | Value::Range { .. }
             | Value::Text(_)
     )
 }
@@ -1149,14 +1152,21 @@ impl<'a> Interpreter<'a> {
                 body,
             } => {
                 let iterable = self.eval(iterable, line)?;
-                let rows: Vec<Vec<Value>> = if names.len() == 1 {
-                    iterate(&iterable, line)?
-                        .into_iter()
-                        .map(|item| vec![item])
-                        .collect()
-                } else {
-                    iterate_pairs(&iterable, line)?
-                };
+                // Ranges are produced lazily so `for i in 0..1_000_000_000`
+                // does not allocate a billion values up front.
+                let rows: Box<dyn Iterator<Item = Vec<Value>>> =
+                    match (&iterable, names.len()) {
+                        (Value::Range { start, end, inclusive }, 1) => Box::new(
+                            range_values(*start, *end, *inclusive)
+                                .map(|number| vec![Value::Int(number)]),
+                        ),
+                        (_, 1) => Box::new(
+                            iterate(&iterable, line)?
+                                .into_iter()
+                                .map(|item| vec![item]),
+                        ),
+                        _ => Box::new(iterate_pairs(&iterable, line)?.into_iter()),
+                    };
 
                 for row in rows {
                     for (name, value) in names.iter().zip(row) {
@@ -1340,6 +1350,30 @@ impl<'a> Interpreter<'a> {
                     .map(|expr| self.eval(expr, line))
                     .transpose()?;
                 slice_value(object, start, stop, step, line)
+            }
+            Expr::Range {
+                start,
+                end,
+                inclusive,
+            } => {
+                let start = self.eval(start, line)?;
+                let end = self.eval(end, line)?;
+
+                match (start, end) {
+                    (Value::Int(start), Value::Int(end)) => Ok(Value::Range {
+                        start,
+                        end,
+                        inclusive: *inclusive,
+                    }),
+                    (start, end) => Err(Error::new(
+                        line,
+                        format!(
+                            "range endpoints must be Int, got {} and {}",
+                            start.type_name(),
+                            end.type_name()
+                        ),
+                    )),
+                }
             }
             Expr::Field { object, name } => {
                 let object = self.eval(object, line)?;
@@ -2276,6 +2310,7 @@ impl<'a> Interpreter<'a> {
             "hashset" | "set" => matches!(value, Value::HashSet(_)),
             "hashmap" | "map" => matches!(value, Value::Map(_)),
             "matrix" | "mat" => matches!(value, Value::Matrix(_)),
+            "range" => matches!(value, Value::Range { .. }),
             _ => {
                 let expected = annotation.as_str();
                 if self.env.get_trait(expected).is_some() {
@@ -2754,7 +2789,38 @@ fn length_of(value: &Value) -> Option<usize> {
         Value::HashSet(items) => Some(items.len()),
         Value::Map(entries) => Some(entries.len()),
         Value::Matrix(rows) => Some(rows.len()),
+        Value::Range {
+            start,
+            end,
+            inclusive,
+        } => Some(range_len(*start, *end, *inclusive)),
         _ => None,
+    }
+}
+
+/// Number of integers in a range, saturating for ranges too large to fit in a
+/// machine word.
+fn range_len(start: i64, end: i64, inclusive: bool) -> usize {
+    let count: i128 = if inclusive {
+        if start > end {
+            0
+        } else {
+            (end as i128) - (start as i128) + 1
+        }
+    } else if start >= end {
+        0
+    } else {
+        (end as i128) - (start as i128)
+    };
+
+    usize::try_from(count).unwrap_or(usize::MAX)
+}
+
+fn range_contains(start: i64, end: i64, inclusive: bool, value: i64) -> bool {
+    if inclusive {
+        start <= value && value <= end
+    } else {
+        start <= value && value < end
     }
 }
 
@@ -2920,6 +2986,20 @@ fn membership(value: &Value, container: &Value, line: usize) -> Result<bool, Err
         Value::Matrix(rows) => match value {
             Value::Text(row) => Ok(rows.contains_key(row)),
             _ => Ok(false),
+        },
+        Value::Range {
+            start,
+            end,
+            inclusive,
+        } => match value {
+            Value::Int(number) => Ok(range_contains(*start, *end, *inclusive, *number)),
+            other => Err(Error::new(
+                line,
+                format!(
+                    "range membership needs Int on the left, got {}",
+                    other.type_name()
+                ),
+            )),
         },
         other => Err(Error::new(
             line,
@@ -3162,6 +3242,11 @@ fn convert_to_bool(value: &Value) -> Value {
         Value::HashSet(items) => !items.is_empty(),
         Value::Map(entries) => !entries.is_empty(),
         Value::Matrix(rows) => !rows.is_empty(),
+        Value::Range {
+            start,
+            end,
+            inclusive,
+        } => range_len(*start, *end, *inclusive) > 0,
         Value::Struct(_) => true,
         Value::None => false,
     })
@@ -3403,13 +3488,28 @@ fn iterate(value: &Value, line: usize) -> Result<Vec<Value>, Error> {
             Ok(names.into_iter().map(Value::Text).collect())
         }
         Value::Text(text) => Ok(text.chars().map(|c| Value::Text(c.to_string())).collect()),
+        Value::Range {
+            start,
+            end,
+            inclusive,
+        } => Ok(range_values(*start, *end, *inclusive)
+            .map(Value::Int)
+            .collect()),
         other => Err(Error::new(
             line,
             format!(
-                "cannot loop over a {} (use a list, hashset, hashmap, matrix, or text)",
+                "cannot loop over a {} (use a list, hashset, hashmap, matrix, range, or text)",
                 other.type_name()
             ),
         )),
+    }
+}
+
+fn range_values(start: i64, end: i64, inclusive: bool) -> Box<dyn Iterator<Item = i64>> {
+    if inclusive {
+        Box::new(start..=end)
+    } else {
+        Box::new(start..end)
     }
 }
 
@@ -3849,6 +3949,56 @@ mod tests {
 
         assert_eq!(env.get_value("letters").unwrap(), Value::Int(3));
         assert_eq!(env.get_value("seen").unwrap(), Value::Int(7));
+    }
+
+    #[test]
+    fn ranges_iterate_exclusively_and_inclusively() {
+        let env = env_after(
+            "exclusive = 0\n\
+             for i in 0..5 { exclusive = exclusive + i }\n\
+             inclusive = 0\n\
+             for i in 1..=5 { inclusive = inclusive + i }\n\
+             empty = 0\n\
+             for i in 5..5 { empty = empty + 1 }\n\
+             single = 0\n\
+             for i in 4..=4 { single = single + 1 }\n\
+             backwards = 0\n\
+             for i in 5..0 { backwards = backwards + 1 }\n\
+             n = 4\n\
+             until_n = 0\n\
+             for i in 0..n + 1 { until_n = until_n + i }\n\
+             numbers = list(0..4)\n\
+             size = len(0..5)\n\
+             inside = 3 in 0..5\n\
+             outside = 5 in 0..5\n\
+             edge = 5 in 0..=5\n\
+             label = str(1..=3)",
+        );
+
+        assert_eq!(env.get_value("exclusive").unwrap(), Value::Int(10));
+        assert_eq!(env.get_value("inclusive").unwrap(), Value::Int(15));
+        assert_eq!(env.get_value("empty").unwrap(), Value::Int(0));
+        assert_eq!(env.get_value("single").unwrap(), Value::Int(1));
+        assert_eq!(env.get_value("backwards").unwrap(), Value::Int(0));
+        assert_eq!(env.get_value("until_n").unwrap(), Value::Int(10));
+        assert_eq!(
+            env.get_value("numbers").unwrap(),
+            Value::list((0..4).map(Value::Int).collect())
+        );
+        assert_eq!(env.get_value("size").unwrap(), Value::Int(5));
+        assert_eq!(env.get_value("inside").unwrap(), Value::Bool(true));
+        assert_eq!(env.get_value("outside").unwrap(), Value::Bool(false));
+        assert_eq!(env.get_value("edge").unwrap(), Value::Bool(true));
+        assert_eq!(env.get_value("label").unwrap(), Value::Text("1..=3".into()));
+    }
+
+    #[test]
+    fn range_endpoints_must_be_ints() {
+        let error = error_of("for i in 0.5..3 { }");
+        assert!(
+            error.message.contains("range endpoints must be Int"),
+            "{error}"
+        );
     }
 
     #[test]

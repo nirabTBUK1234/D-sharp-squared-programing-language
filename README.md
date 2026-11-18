@@ -176,6 +176,7 @@ console built-ins.
 | Hashset | `hashSet(1, 2, 2)` / `set(1, 2)` | Duplicates collapse; scalars only |
 | Hashmap | `{"a": 1, "b": 2}` | Keys can be int, float, bool, or text; read/write with `[ ]` |
 | Matrix | `mat{row1: {a: 1, b: 2}}` | Named rows of named cells; `matrix`/`matrex` are aliases |
+| Range | `0..5`, `1..=5` | Lazy integer interval; end-exclusive with `..`, end-inclusive with `..=` |
 | Struct | `Point(1, 2)` | Fixed named fields; declared with `struct`, methods with `impl`, behavior with traits |
 | None | `None` | Returned by functions that do not return a value |
 
@@ -229,14 +230,28 @@ loop {                     # extension: Python has no `loop`
 for ch in "abc" {
     print(ch)
 }
+
+for i in 0..5 {           # 0, 1, 2, 3, 4 (Rust-style exclusive)
+    print(i)
+}
+
+for i in 1..=5 {          # 1, 2, 3, 4, 5 (inclusive)
+    print(i)
+}
 ```
 
 - Conditions must be `bool`; there is no truthiness, so `if 1 { }` is an error.
 - `elif` may follow `}` on the same line or the next line.
 - `for name in <value>` iterates a `list` or `hashSet` (items), a `hashmap`
-  (keys), a `matrix` (row names, sorted), or `text` (characters).
+  (keys), a `matrix` (row names, sorted), a `range`, or `text` (characters).
 - `for key, value in <hashmap>` binds both the key and its value. Two-variable
   loops are only supported for hashmaps.
+- Ranges are written `start..end` (end excluded) or `start..=end` (end
+  included), like Rust. Endpoints must be `Int`, and a backwards range is
+  empty. Ranges are lazy, so they do not build a list just to loop.
+- Membership works on ranges too: `3 in 0..5` is `True`, and
+  `5 in 0..5` is `False`.
+- `list(0..4)` materializes a range as `[0, 1, 2, 3]`, and `len(0..5)` is `5`.
 - `break` and `continue` only work inside a loop.
 - `loop { }` is a convenience for `while True` and is the one non-Python
   control-flow keyword kept as an extension.
@@ -280,7 +295,7 @@ print(min([4, 1, 9]))          # 1
   follow one with a default.
 - A parameter may be annotated as `name: Type`, for example `x: Int`. Built-in
   annotations are `Int`, `Float`, `Number`, `Bool`, `Text`, `Any`, `List`,
-  `HashSet`, `HashMap`, and `Matrix`; a struct, trait, or type-parameter name can
+  `HashSet`, `HashMap`, `Matrix`, and `Range`; a struct, trait, or type-parameter name can
   also be used. Annotations are checked when the function is called. Use
   `List[Int]` (or `List[List[Text]]`, and so on) to require one element type.
 - Add `-> Type` after the parameter list to declare a return type:
@@ -614,7 +629,8 @@ Lowest to highest precedence:
 | `and`, `&&` | Logical and (short-circuits) |
 | `==`, `!=` | Equality / inequality |
 | `>`, `>=`, `<`, `<=` | Ordering |
-| `in`, `not in` | Membership tests for lists, texts, hashsets, hashmaps, and matrix rows |
+| `in`, `not in` | Membership tests for lists, texts, hashsets, hashmaps, matrix rows, and ranges |
+| `..`, `..=` | Range construction (`end` excluded or included) |
 | `+`, `-` | Addition/subtraction; `+` also joins two texts or concatenates two lists |
 | `*`, `/`, `%` | Multiplication, division, remainder |
 | `not`, `!`, unary `-` | Logical not, numeric negation |

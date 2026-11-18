@@ -17,6 +17,8 @@ pub enum TokenKind {
     Semicolon,
     Newline,
     Dot,
+    DotDot,
+    DotDotEqual,
     Dollar,
 
     // operators
@@ -114,7 +116,24 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Error> {
             ',' => single(&mut chars, &mut tokens, TokenKind::Comma, token_line),
             ':' => single(&mut chars, &mut tokens, TokenKind::Colon, token_line),
             ';' => single(&mut chars, &mut tokens, TokenKind::Semicolon, token_line),
-            '.' => single(&mut chars, &mut tokens, TokenKind::Dot, token_line),
+            '.' => {
+                chars.next();
+                let kind = if chars.peek() == Some(&'.') {
+                    chars.next();
+                    if chars.peek() == Some(&'=') {
+                        chars.next();
+                        TokenKind::DotDotEqual
+                    } else {
+                        TokenKind::DotDot
+                    }
+                } else {
+                    TokenKind::Dot
+                };
+                tokens.push(Token {
+                    kind,
+                    line: token_line,
+                });
+            }
             '$' => single(&mut chars, &mut tokens, TokenKind::Dollar, token_line),
             '+' => single(&mut chars, &mut tokens, TokenKind::Plus, token_line),
             '-' => {
@@ -324,7 +343,14 @@ fn number(chars: &mut Peekable<Chars<'_>>, line: usize) -> Result<TokenKind, Err
     }
 
     let mut is_float = false;
-    if chars.peek() == Some(&'.') {
+    // `1..5` is a range, not the float `1.` followed by `.5`, so only consume
+    // the dot when a digit follows it.
+    let starts_float = chars.peek() == Some(&'.') && {
+        let mut lookahead = chars.clone();
+        lookahead.next();
+        lookahead.peek().is_some_and(|c| c.is_ascii_digit())
+    };
+    if starts_float {
         chars.next();
         is_float = true;
         text.push('.');
@@ -439,6 +465,23 @@ mod tests {
                 TokenKind::Identifier("c".into()),
                 TokenKind::Assign,
                 TokenKind::Identifier("d".into()),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_ranges_without_breaking_floats() {
+        assert_eq!(
+            kinds("0..5 1..=3 2.5"),
+            vec![
+                TokenKind::Int(0),
+                TokenKind::DotDot,
+                TokenKind::Int(5),
+                TokenKind::Int(1),
+                TokenKind::DotDotEqual,
+                TokenKind::Int(3),
+                TokenKind::Float(2.5),
                 TokenKind::Eof,
             ]
         );

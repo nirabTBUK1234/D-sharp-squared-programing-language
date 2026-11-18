@@ -21,6 +21,7 @@ pub enum TypeSpec {
     HashSet,
     HashMap,
     Matrix,
+    Range,
     /// A struct, trait, or unresolved type-parameter name.
     Named(String),
 }
@@ -40,6 +41,7 @@ impl fmt::Display for TypeSpec {
             TypeSpec::HashSet => write!(f, "HashSet"),
             TypeSpec::HashMap => write!(f, "HashMap"),
             TypeSpec::Matrix => write!(f, "Matrix"),
+            TypeSpec::Range => write!(f, "Range"),
             TypeSpec::Named(name) => write!(f, "{name}"),
         }
     }
@@ -120,6 +122,7 @@ impl SetItem {
             Value::Text(s) => Ok(SetItem::Text(s)),
             Value::HashSet(_) => Err("hashset items cannot be another hashset".to_string()),
             Value::Matrix(_) => Err("hashset items cannot be a matrix".to_string()),
+            Value::Range { .. } => Err("hashset items cannot be a range".to_string()),
             Value::Map(_) => Err("hashset items cannot be a hashmap".to_string()),
             Value::List(_) => Err("hashset items cannot be a list".to_string()),
             Value::Struct(_) => Err("hashset items cannot be a struct".to_string()),
@@ -181,6 +184,12 @@ pub enum Value {
     List(Rc<ListValue>),
     HashSet(HashSet<SetItem>),
     Matrix(HashMap<String, HashMap<String, Value>>),
+    /// `1..5` (exclusive) or `1..=5` (inclusive): a lazy integer interval.
+    Range {
+        start: i64,
+        end: i64,
+        inclusive: bool,
+    },
     /// `{"a": 1}`: Python-style dictionary keyed by hashable scalars.
     Map(HashMap<SetItem, Value>),
     /// `Point(1, 2)`: a fixed set of named fields, created by `struct`.
@@ -208,6 +217,7 @@ impl Value {
             Value::List(_) => "list",
             Value::HashSet(_) => "hashset",
             Value::Matrix(_) => "matrix",
+            Value::Range { .. } => "range",
             Value::Map(_) => "hashmap",
             Value::Struct(value) => &value.type_name,
             Value::None => "None",
@@ -250,6 +260,17 @@ impl fmt::Display for Value {
                     .collect();
                 parts.sort();
                 write!(f, "mat{{{}}}", parts.join(", "))
+            }
+            Value::Range {
+                start,
+                end,
+                inclusive,
+            } => {
+                if *inclusive {
+                    write!(f, "{start}..={end}")
+                } else {
+                    write!(f, "{start}..{end}")
+                }
             }
             Value::Map(entries) => {
                 let mut parts: Vec<String> = entries

@@ -291,6 +291,7 @@
             "less": { "rust": "<", "status": "DONE", "note": "< operator" },
             "greater_equal": { "rust": ">=", "status": "DONE", "note": ">= operator" },
             "less_equal": { "rust": "<=", "status": "DONE", "note": "<= operator" },
+            "range": { "rust": ".. / ..=", "status": "DONE", "note": "exclusive and inclusive ranges" },
             "assign": { "rust": "=", "status": "DONE", "note": "= operator" }
         },
 
@@ -306,7 +307,8 @@
             "set": { "rust": "HashSet", "status": "DONE" },
             "hashset": { "rust": "HashSet", "status": "DONE" },
             "matrix": { "rust": "HashMap<String, HashMap<String, Value>>", "status": "DONE" },
-            "matrex": { "rust": "HashMap<String, HashMap<String, Value>>", "status": "DONE", "note": "alias for matrix" }
+            "matrex": { "rust": "HashMap<String, HashMap<String, Value>>", "status": "DONE", "note": "alias for matrix" },
+            "range": { "rust": "Range<i64>", "status": "DONE", "note": "lazy integer range" }
         },
 
         "memory": {

@@ -102,6 +102,12 @@ pub enum Expr {
         stop: Option<Box<Expr>>,
         step: Option<Box<Expr>>,
     },
+    /// `start..end` (exclusive) or `start..=end` (inclusive).
+    Range {
+        start: Box<Expr>,
+        end: Box<Expr>,
+        inclusive: bool,
+    },
     Field {
         object: Box<Expr>,
         name: String,
