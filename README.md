@@ -763,6 +763,194 @@ alignment specifiers such as `{:>5}` are rejected with an error.
 
 """
 
+### Files
+
+"""
+
+`file(path)` creates a `File` object for a path written as Text:
+
+```text
+f = file("notes.txt")
+f.create()
+f.write("hello")
+f.append(" world")
+
+print(f.read())       # hello world
+print(f.size())       # 11
+print(f.exists())     # True
+
+f.copy("backup.txt")  # returns the number of bytes copied
+f.rename("renamed.txt")
+f.delete()
+```
+
+| Method | Effect |
+|---|---|
+| `f.read()` | Return the whole file as Text |
+| `f.write(data)` | Create or replace the file with Text `data` |
+| `f.append(data)` | Append Text `data`, creating the file if needed |
+| `f.delete()` | Remove the file |
+| `f.copy(dest)` | Copy to `dest`; returns the copied byte count as Int |
+| `f.rename(new)` | Rename the file and update the object's path |
+| `f.exists()` | Return `True` or `False` |
+| `f.create()` | Create or truncate the file |
+| `f.size()` | Return the file size in bytes as Int |
+
+- Paths must be Text; `file(1)` is an error.
+- `write`, `append`, and `copy` data/destinations must be Text.
+- Failures name the operation and path, for example
+  `file.read() failed for 'missing.txt': No such file or directory`.
+- `rename` updates the receiver when it is a plain variable, so
+  `f.rename("new.txt")` then `f.read()` reads the new path. Other file
+  operations do not need write-back.
+- As with struct methods, a renamed temporary such as
+  `file("a.txt").rename("b.txt")` renames the file but the temporary is gone.
+
+"""
+
+### Graphics
+
+"""
+
+`gl` and `vk` open real desktop windows. Both backends use SDL2 for the window
+and event loop; OpenGL uses a 3.3 core context through `glow`, and Vulkan uses
+`ash` with a swapchain and render pass. They are independent, so close one
+before opening the other.
+
+**OpenGL**
+
+For a window that only needs a solid background, `frame` handles event polling,
+clearing, and buffer swapping in one call:
+
+```text
+gl.init("D#2 OpenGL", 800, 600)
+while gl.frame(0.1, 0.1, 0.15) { }
+gl.close()
+```
+
+The optional fourth color value is alpha and defaults to `1.0`. Use the
+lower-level calls below when you need to draw objects.
+
+```text
+gl.init("D#2 OpenGL", 800, 600)
+gl.clearColor(0.1, 0.1, 0.15, 1.0)
+
+vertex = gl.createShader("vertex", "#version 330 core\n\
+layout (location = 0) in vec2 position;\n\
+void main() { gl_Position = vec4(position, 0.0, 1.0); }\n")
+fragment = gl.createShader("fragment", "#version 330 core\n\
+out vec4 color;\n\
+void main() { color = vec4(1.0, 0.5, 0.2, 1.0); }\n")
+
+program = gl.createProgram(vertex, fragment)
+gl.useProgram(program)
+
+vao = gl.createVertexArray()
+gl.bindVertexArray(vao)
+buffer = gl.createBuffer()
+gl.bindBuffer("array", buffer)
+gl.bufferData("array", [-0.5, -0.5, 0.5, -0.5, 0.0, 0.5], "static")
+gl.enableVertexAttribArray(0)
+gl.vertexAttribPointer(0, 2, "float", False, 0, 0)
+
+while not gl.shouldClose() {
+    gl.poll()
+    gl.clear()
+    gl.drawArrays("triangles", 0, 3)
+    gl.present()
+}
+
+gl.deleteBuffer(buffer)
+gl.deleteVertexArray(vao)
+gl.deleteProgram(program)
+gl.deleteShader(vertex)
+gl.deleteShader(fragment)
+gl.close()
+```
+
+Core OpenGL calls:
+
+| Method | Effect |
+|---|---|
+| `gl.init(title, width, height)` | Create the window and OpenGL context |
+| `gl.frame(r, g, b[, a])` | Poll events, clear to a color, swap buffers; returns `False` when closed |
+| `gl.poll()` / `gl.shouldClose()` | Pump events; check whether the window was closed |
+| `gl.present()` | Swap buffers |
+| `gl.close()` | Destroy the window and context |
+| `gl.setTitle(text)` / `gl.size()` | Change the title; read `[width, height]` |
+| `gl.clearColor(r, g, b, a)` | Set the clear colour (0.0–1.0 floats) |
+| `gl.clear(mask)` | Clear `"color"`, `"depth"`, `"stencil"`, or a `"color \| depth"` combination |
+| `gl.viewport(x, y, w, h)` | Set the viewport |
+| `gl.enable(name)` / `gl.disable(name)` / `gl.blendFunc(a, b)` / `gl.depthFunc(fn)` / `gl.cullFace(face)` | Render state |
+| `gl.getError()` / `gl.errorName(code)` | Read the last GL error |
+| `gl.getString("vendor" \| "renderer" \| "version" \| "glsl")` | Driver information |
+| `gl.createShader(stage, source)` | Compile `"vertex"` or `"fragment"` GLSL; returns a handle |
+| `gl.createProgram(vertex, fragment)` | Link two shader handles; returns a program handle |
+| `gl.useProgram(handle)` | Bind a program |
+| `gl.createBuffer()` / `gl.createVertexArray()` | Allocate GL objects; return Int handles |
+| `gl.bindBuffer(target, handle)` | `target` is `"array"`, `"element"`, or `"uniform"` |
+| `gl.bufferData(target, numbers, usage, type)` | Upload `f32`, `u32`, `i32`, `u16`, or `u8` data; `usage` is `"static"`, `"dynamic"`, or `"stream"` |
+| `gl.bindVertexArray(handle)` / `gl.enableVertexAttribArray(index)` | Bind a VAO and enable attributes |
+| `gl.vertexAttribPointer(index, size, type, normalized, stride, offset)` | Describe an attribute |
+| `gl.drawArrays(mode, first, count)` / `gl.drawElements(mode, count, type, offset)` | Draw; modes include `"triangles"`, `"lines"`, and `"points"` |
+| `gl.getUniformLocation(program, name)` | Look up a uniform |
+| `gl.uniform1f` … `gl.uniform4f` / `gl.uniform1i` | Set scalar and vector uniforms |
+| `gl.uniformMatrix4fv(location, values)` | Upload a list of 16 floats |
+
+Every object-returning call returns an `Int` handle. Delete objects with the
+matching `gl.deleteShader`, `gl.deleteProgram`, `gl.deleteBuffer`, or
+`gl.deleteVertexArray` call.
+
+**Vulkan**
+
+The same one-call loop works for a cleared Vulkan window:
+
+```text
+vk.init("D#2 Vulkan", 800, 600)
+while vk.frame(0.1, 0.2, 0.35) { }
+vk.close()
+```
+
+The optional fourth color value is alpha and defaults to `1.0`.
+
+```text
+vk.init("D#2 Vulkan", 800, 600)
+vk.clearColor(0.1, 0.2, 0.35, 1.0)
+print(vk.deviceName())
+print(vk.apiVersion())
+
+while not vk.shouldClose() {
+    vk.poll()
+    vk.present()
+}
+
+vk.close()
+```
+
+| Method | Effect |
+|---|---|
+| `vk.init(title, width, height)` | Create the window, instance, device, swapchain, and render pass |
+| `vk.frame(r, g, b[, a])` | Poll events, clear to a color, present; returns `False` when closed |
+| `vk.poll()` / `vk.shouldClose()` | Pump events; check whether the window was closed |
+| `vk.present()` / `vk.clear()` | Clear to the current colour and present the frame |
+| `vk.clearColor(r, g, b, a)` | Set the clear colour |
+| `vk.setTitle(text)` / `vk.size()` | Change the title; read `[width, height]` |
+| `vk.deviceName()` / `vk.apiVersion()` | Selected GPU and Vulkan version |
+| `vk.waitIdle()` | Wait for GPU work to finish |
+| `vk.close()` | Destroy all Vulkan objects and the window |
+
+The Vulkan backend currently renders a cleared frame. Raw pipeline, shader
+module, buffer, and draw calls are listed as `TODO` in
+`src/builtin_functions.json`; the OpenGL backend is the complete drawing path
+today.
+
+Graphics calls need a desktop session (`DISPLAY` or `WAYLAND_DISPLAY`) plus the
+SDL2, OpenGL, and Vulkan runtime libraries. Each backend allows one open window
+at a time. A script error leaves the window open until the process exits, so
+close windows explicitly when you are done.
+
+"""
+
 ## Migrating from the earlier Rust-like syntax
 
 """
@@ -839,6 +1027,7 @@ The REPL prints the same format and keeps going.
 | `src/parser/ast.rs` | Expression/statement tree |
 | `src/parser/parsers.rs` | Recursive-descent parser (precedence climbing) |
 | `src/runner/run.rs` | Environments, interpreter, built-ins, REPL |
+| `src/graphics.rs` | `gl.*` OpenGL (SDL2 + glow) and `vk.*` Vulkan (SDL2 + ash) backends |
 | `src/value.rs` | `Value` / `SetItem` types and display rules |
 | `src/builtin_functions.json` | Planned language keyword/built-in → Rust mapping |
 
@@ -860,11 +1049,19 @@ The REPL prints the same format and keeps going.
   functions (`def name<T: Trait>(value)`), statement token macros
   (`macro name($a) { ... }`, called with `name$(...)`), and multifile imports
   (`import "file.dsq"` / `import name`).
+- Done: explicit conversions between values: `int`, `float`, `bool`, `str`,
+  `list`, `set`, `dict`, and `matrix` (with `Int`, `Float`, `Bool`, `Text`,
+  `hashSet`, `hashMap`, `Matrix`, and related aliases).
+- Done: file objects from `file(path)` with `read`, `write`, `append`, `delete`,
+  `copy`, `rename`, `exists`, `create`, and `size`.
+- Done: desktop graphics through `gl.*` (OpenGL 3.3 core, including shaders,
+  buffers, vertex arrays, draws, and uniforms) and `vk.*` (Vulkan window,
+  swapchain, clear, and present).
 - Next: `match`/enums, closures/lexical scoping, namespaced modules, then
   `try`/`except`/`raise`.
-- Built-in methods: only `console.*` (plus `print`/`input`) is implemented; the
-  `file`, `data`, `collections`, `query`, `matrex`, `time`, `math`, `game`, and
-  `system` groups are not wired up yet.
+- Built-in methods: `console.*`, `file.*`, `gl.*`, and `vk.*` (plus
+  `print`/`input`) are implemented; the `data`, `collections`, `query`,
+  `matrex`, `time`, `math`, `game`, and `system` groups are not wired up yet.
 
 """
 
@@ -896,6 +1093,9 @@ The REPL prints the same format and keeps going.
   `[1] < [2]` are not implemented.
 - Macros are textual and unhygienic; they only expand in statement position and
   must be invoked with `name$(...)`.
+- The Vulkan backend clears and presents a swapchain image but does not yet
+  expose shader modules, graphics pipelines, buffers, or draw calls. Use
+  `gl.*` for complete drawing today.
 - Struct methods write mutations back only when called on a plain variable;
   nested receivers such as `outer.inner.shift(...)` do not propagate the change.
   List methods mutate shared list references, so `outer[0].append(x)` does work.

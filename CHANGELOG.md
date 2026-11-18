@@ -6,6 +6,121 @@ Release history for D#².
 Each release lists the language changes and the notes that matter for users.
 """
 
+## v1.8.0 — 2026-11-18
+
+"""
+OpenGL and Vulkan windows from D#2 scripts.
+"""
+
+### Language
+
+"""
+
+- `gl.init(title, width, height)` opens an SDL2 window with an OpenGL 3.3 core
+  context. `gl.poll()`, `gl.shouldClose()`, `gl.present()`, and `gl.close()`
+  drive the event loop.
+- OpenGL state calls are available: `clearColor`, `clear`, `clearDepth`,
+  `viewport`, `enable`, `disable`, `blendFunc`, `depthFunc`, `cullFace`,
+  `getError`, `errorName`, and `getString`.
+- OpenGL objects are exposed as Int handles: shader compilation, program
+  linking, buffers, vertex arrays, vertex attributes, draws, uniforms, and
+  matrix uploads all have `gl.*` calls.
+- `vk.init(title, width, height)` opens an SDL2 Vulkan window with an instance,
+  device, swapchain, render pass, command buffers, and synchronisation objects.
+  `vk.poll()`, `vk.shouldClose()`, `vk.present()`, and `vk.close()` drive the
+  frame loop.
+- Vulkan also exposes `clearColor`, `setTitle`, `size`, `deviceName`,
+  `apiVersion`, and `waitIdle`. The present path clears the swapchain image.
+- Both backends use Python-style keyword-free calls and report errors with the
+  script line, for example
+  `line 1: OpenGL is not initialized; call gl.init(title, width, height)`.
+
+"""
+
+### Notes
+
+"""
+
+- Graphics require a desktop session and the SDL2, OpenGL, and Vulkan runtime
+  libraries. The Rust dependencies are `sdl2`, `glow`, and `ash`.
+- The OpenGL backend is the complete drawing path today. Vulkan shader modules,
+  graphics pipelines, buffers, and draw commands are recorded as `TODO` in
+  `src/builtin_functions.json`.
+- One window per backend can be open at a time. Close it before opening
+  another.
+
+"""
+
+## v1.7.0 — 2026-11-18
+
+"""
+Value conversions between every built-in type.
+"""
+
+### Language
+
+"""
+
+- `str(x)` and its aliases `text` / `Text` convert any value to Text using its
+  display form. `str()` returns `""`.
+- `int(x)` / `Int` accepts Int, Float (truncated toward zero), Bool, and whole
+  number Text. `float(x)` / `Float` accepts Int, Float, Bool, and numeric Text.
+- `bool(x)` / `Bool` applies Python-style truthiness to every value: `0`, `0.0`,
+  `""`, empty collections, empty matrices, and `None` are false; structs are
+  true.
+- `set(x)` / `hashSet` / `Set` expands one iterable argument (list, hashset,
+  hashmap keys, matrix row names, or text characters) and treats multiple
+  arguments as individual items.
+- `dict(x)` / `hashMap` / `Dict` builds a hashmap from a hashmap, matrix,
+  struct fields, or a list of `[key, value]` pairs.
+- `matrix(x)` / `Matrix` / `mat` / `matrex` builds a matrix from a matrix, a
+  nested hashmap `{row: {cell: value}}`, a struct, or a list of
+  `[row, cells]` pairs.
+- `matrix(...)` and `mat(...)` calls are now parsed; `mat{...}` literals still
+  work exactly as before.
+- Calling a conversion with no argument produces the empty value for its type.
+- Impossible conversions raise errors that name the source and target, such as
+  `cannot convert text "abc" to Int` or `cannot convert list to Float`.
+- A function whose body ends with `if`/`elif`/`else` now returns the final bare
+  expression of the selected branch, so `abs`-style functions no longer fall
+  through to `None`.
+- `=<` and `=>` are accepted as aliases for `<=` and `>=`.
+- `file(path)` creates a file object. It supports `read()`, `write(data)`,
+  `append(data)`, `delete()`, `copy(dest)`, `rename(new)`, `exists()`,
+  `create()`, and `size()`.
+- File paths, written data, and copy destinations must be Text. `copy` returns
+  the copied byte count, `size` returns bytes as Int, and `rename` updates the
+  object's path when called on a plain variable.
+- Rust-style ranges are written `start..end` (end excluded) and
+  `start..=end` (end included). Endpoints must be Int, and backwards ranges
+  are empty.
+- Ranges work in `for` loops, membership tests (`if n in 0..5`), `list(...)`,
+  `len(...)`, and the conversion builtins. `for` loops consume ranges lazily
+  instead of materializing every value.
+- `Range` is accepted as a parameter and list element type annotation.
+- Union type annotations accept either type: `Int or Float`, including in
+  returns (`-> Int or Float`) and typed lists (`List[Int or Float]`).
+- `**` is exponentiation: `2 ** 10` is `1024` and `9 ** 0.5` is `3`. It is
+  right-associative and binds tighter than unary minus, so `-2 ** 2` is `-4`.
+  Integer bases stay Int for non-negative integer exponents; floats and
+  negative exponents produce a Float.
+
+"""
+
+### Notes
+
+"""
+
+- Conversions are explicit builtins; there are no implicit coercions in
+  arithmetic, comparisons, or conditions.
+- `int` rejects non-finite floats and values outside the 64-bit signed range.
+- `dict()` and `matrix()` take at most one argument.
+- `set` remains compatible with its earlier item-list form, so `set(1, 2)`
+  still creates a hashset of two items while `set("ab")` now expands to
+  characters.
+
+"""
+
 ## v1.6.0 — 2026-11-07
 
 """

@@ -1,4 +1,5 @@
 mod error;
+mod graphics;
 mod lexer;
 mod parser;
 mod runner;

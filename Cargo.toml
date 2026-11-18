@@ -1,6 +1,9 @@
 [package]
 name = "NewProgrammingLanguageWithRust"
-version = "1.6.0"
+version = "1.8.0"
 edition = "2024"
 
 [dependencies]
+ash = { version = "0.38", default-features = false, features = ["linked"] }
+glow = "0.18"
+sdl2 = "0.39"

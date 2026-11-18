@@ -1405,7 +1405,7 @@ impl<'a> Interpreter<'a> {
                 match callee {
                     Callee::Method { receiver, method } => {
                         if let Expr::Var(name) = receiver.as_ref()
-                            && name == "console"
+                            && matches!(name.as_str(), "console" | "gl" | "vk")
                             && self.env.get_value(name).is_err()
                         {
                             return call_builtin(name, method, &values, line);
@@ -2546,9 +2546,11 @@ fn length_of(value: &Value) -> Option<usize> {
 fn call_builtin(receiver: &str, method: &str, args: &[Value], line: usize) -> Result<Value, Error> {
     match receiver {
         "console" => call_console(method, args, line),
+        "gl" => crate::graphics::call_gl(method, args, line),
+        "vk" => crate::graphics::call_vk(method, args, line),
         _ => Err(Error::new(
             line,
-            format!("unknown call target '{receiver}' (only 'console' is implemented so far)"),
+            format!("unknown call target '{receiver}' (available: console, gl, vk)"),
         )),
     }
 }
