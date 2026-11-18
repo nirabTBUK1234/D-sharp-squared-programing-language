@@ -298,6 +298,9 @@ print(min([4, 1, 9]))          # 1
   `HashSet`, `HashMap`, `Matrix`, and `Range`; a struct, trait, or type-parameter name can
   also be used. Annotations are checked when the function is called. Use
   `List[Int]` (or `List[List[Text]]`, and so on) to require one element type.
+- Join types with `or` when either is accepted:
+  `def add(a: Int or Float) -> Int or Float`, `def pick(x: Int or Text)`, or
+  `List[Int or Float](1, 2.5)`. `Number` is shorthand for `Int or Float`.
 - Add `-> Type` after the parameter list to declare a return type:
   `def max(input: List[Int]) -> Int { ... }`. The returned value, including an
   implicit final expression, is checked on every call. `-> T` works for generic
@@ -711,7 +714,8 @@ works on lists containing only numbers, only text, or only bools.
 The element type is checked at runtime on construction and on every mutation,
 including `append`, `extend`, `insert`, index assignment, and slice assignment.
 Nested types work too: `List[List[Int]]`, `List[Text]`, `List[Person]`, and
-`List[Named]` for a trait.
+`List[Named]` for a trait. A union element type such as `List[Int or Float]`
+accepts any listed type.
 
 ```text
 scores = List[Int](1, 2, 3)

@@ -590,6 +590,12 @@ impl Env {
     fn validate_type_spec(&self, spec: &TypeSpec) -> Result<(), String> {
         match spec {
             TypeSpec::List(Some(inner)) => self.validate_type_spec(inner),
+            TypeSpec::Union(members) => {
+                for member in members {
+                    self.validate_type_spec(member)?;
+                }
+                Ok(())
+            }
             TypeSpec::Named(name) => {
                 if self.get_trait(name).is_some() || self.get_struct(name).is_some() {
                     Ok(())
@@ -627,7 +633,17 @@ impl Env {
             }
             TypeSpec::HashMap => ensure_simple(value, spec, line, matches!(value, Value::Map(_))),
             TypeSpec::Matrix => ensure_simple(value, spec, line, matches!(value, Value::Matrix(_))),
-            TypeSpec::Range => ensure_simple(value, spec, line, matches!(value, Value::Range { .. })),
+            TypeSpec::Range => {
+                ensure_simple(value, spec, line, matches!(value, Value::Range { .. }))
+            }
+            TypeSpec::Union(members) => {
+                for member in members {
+                    if self.ensure_value_matches_spec(value, member, line).is_ok() {
+                        return Ok(());
+                    }
+                }
+                Err(format!("expected {spec}, got {}", value.type_name()))
+            }
             TypeSpec::List(None) => {
                 ensure_simple(value, spec, line, matches!(value, Value::List(_)))
             }
@@ -711,6 +727,26 @@ impl Env {
                     Err(format!("list is typed {existing}, expected {expected}"))
                 }
             }
+            TypeSpec::Union(expected_members) => {
+                let compatible = match existing {
+                    TypeSpec::Union(existing_members) => existing_members.iter().all(|existing| {
+                        expected_members.iter().any(|expected| {
+                            self.ensure_spec_compatible(existing, expected, _line)
+                                .is_ok()
+                        })
+                    }),
+                    _ => expected_members.iter().any(|expected| {
+                        self.ensure_spec_compatible(existing, expected, _line)
+                            .is_ok()
+                    }),
+                };
+
+                if compatible {
+                    Ok(())
+                } else {
+                    Err(format!("list is typed {existing}, expected {expected}"))
+                }
+            }
             TypeSpec::List(None) => {
                 if matches!(existing, TypeSpec::List(_)) {
                     Ok(())
@@ -763,10 +799,71 @@ fn ensure_simple(
     }
 }
 
+fn is_type_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// Splits `Int or Float` at top-level `or` words. An `or` inside brackets
+/// belongs to the nested type, so `List[Int or Float]` stays one member.
+fn split_union_type(text: &str) -> Result<Vec<&str>, String> {
+    let bytes = text.as_bytes();
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    let mut index = 0usize;
+    let mut saw_or = false;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'[' => depth += 1,
+            b']' => depth = depth.saturating_sub(1),
+            b'o' | b'O'
+                if depth == 0
+                    && (index == 0 || !is_type_word_byte(bytes[index - 1]))
+                    && index + 1 < bytes.len()
+                    && matches!(bytes[index + 1], b'r' | b'R')
+                    && (index + 2 == bytes.len()
+                        || !is_type_word_byte(bytes[index + 2])) =>
+            {
+                let part = text[start..index].trim();
+                if part.is_empty() {
+                    return Err(format!("missing a type before 'or' in '{text}'"));
+                }
+                parts.push(part);
+                saw_or = true;
+                start = index + 2;
+                index += 2;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+
+    if !saw_or {
+        return Ok(vec![text]);
+    }
+
+    let last = text[start..].trim();
+    if last.is_empty() {
+        return Err(format!("missing a type after 'or' in '{text}'"));
+    }
+    parts.push(last);
+    Ok(parts)
+}
+
 fn parse_type_spec(text: &str) -> Result<TypeSpec, String> {
     let text = text.trim();
     if text.is_empty() {
         return Err("empty type annotation".to_string());
+    }
+
+    let union_members = split_union_type(text)?;
+    if union_members.len() > 1 {
+        let mut members = Vec::with_capacity(union_members.len());
+        for member in union_members {
+            members.push(parse_type_spec(member)?);
+        }
+        return Ok(TypeSpec::Union(members));
     }
 
     if let Some(open) = text.find('[') {
@@ -863,6 +960,12 @@ fn resolve_type_spec(spec: TypeSpec, type_params: &[TypeParameter]) -> TypeSpec 
         TypeSpec::List(Some(inner)) => {
             TypeSpec::List(Some(Box::new(resolve_type_spec(*inner, type_params))))
         }
+        TypeSpec::Union(members) => TypeSpec::Union(
+            members
+                .into_iter()
+                .map(|member| resolve_type_spec(member, type_params))
+                .collect(),
+        ),
         other => other,
     }
 }
@@ -2245,7 +2348,10 @@ impl<'a> Interpreter<'a> {
         let Some(annotation) = &param.type_annotation else {
             return Ok(());
         };
-        if annotation.contains('[') {
+        let is_union = annotation
+            .split_whitespace()
+            .any(|word| word.eq_ignore_ascii_case("or"));
+        if annotation.contains('[') || is_union {
             let spec = parse_type_spec(annotation).map_err(|message| Error::new(line, message))?;
             let spec = resolve_type_spec(spec, &function.type_params);
             self.env
@@ -5241,6 +5347,55 @@ mod tests {
         assert_eq!(env.get_value("c").unwrap(), Value::Text("ok".into()));
         assert_eq!(env.get_value("d").unwrap(), Value::Bool(true));
         assert_eq!(env.get_value("e").unwrap(), Value::Float(1.5));
+    }
+
+    #[test]
+    fn union_annotations_accept_either_type() {
+        let env = env_after(
+            "def add(a: Int or Float, b: int or float) -> Int or Float { a + b }\n\
+             def pick(value: Int or Text) { value }\n\
+             a = add(1, 2)\n\
+             b = add(1.5, 2)\n\
+             c = pick(7)\n\
+             d = pick(\"ok\")\n\
+             values = List[Int or Float](1, 2.5, 3)\n\
+             values.append(4.5)",
+        );
+
+        assert_eq!(env.get_value("a").unwrap(), Value::Int(3));
+        assert_eq!(env.get_value("b").unwrap(), Value::Float(3.5));
+        assert_eq!(env.get_value("c").unwrap(), Value::Int(7));
+        assert_eq!(env.get_value("d").unwrap(), Value::Text("ok".into()));
+        assert_eq!(
+            env.get_value("values").unwrap().to_string(),
+            "[1, 2.5, 3, 4.5]"
+        );
+
+        let error = error_of(
+            "def f(x: Int or Float) { x }\n\
+             f(\"nope\")",
+        );
+        assert!(
+            error.message.contains("must be Int or Float")
+                && error.message.contains("got text"),
+            "{error}"
+        );
+        assert_eq!(error.line, 2);
+
+        let error = error_of("values = List[Int or Float](1, \"x\")");
+        assert!(
+            error.message.contains("expected Int or Float, got text"),
+            "{error}"
+        );
+
+        let error = error_of(
+            "values = List[Int or Float](1, 2.5)\n\
+             values.append(\"x\")",
+        );
+        assert!(
+            error.message.contains("expected Int or Float, got text"),
+            "{error}"
+        );
     }
 
     #[test]

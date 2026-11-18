@@ -571,6 +571,20 @@ impl Parser {
     }
 
     fn type_annotation(&mut self) -> Result<String, Error> {
+        let mut annotation = self.single_type_annotation()?;
+
+        // `Int or Float` accepts either type. `or` is the same token that
+        // logical expressions use, but this parser only consumes it inside a
+        // type annotation.
+        while self.match_kind(&TokenKind::Or) {
+            let right = self.single_type_annotation()?;
+            annotation = format!("{annotation} or {right}");
+        }
+
+        Ok(annotation)
+    }
+
+    fn single_type_annotation(&mut self) -> Result<String, Error> {
         let name = self.consume_identifier("expected a type name after ':'")?;
 
         if !self.match_kind(&TokenKind::LeftBracket) {

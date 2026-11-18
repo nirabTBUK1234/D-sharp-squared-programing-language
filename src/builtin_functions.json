@@ -283,7 +283,7 @@
 
         "operators": {
             "and": { "rust": "&&", "status": "DONE" },
-            "or": { "rust": "||", "status": "DONE" },
+            "or": { "rust": "||", "status": "DONE", "note": "logical or; also joins type unions" },
             "not": { "rust": "!", "status": "DONE" },
             "is": { "rust": "==", "status": "DONE", "note": "== operator" },
             "is_not": { "rust": "!=", "status": "DONE", "note": "!= operator" },

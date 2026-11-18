@@ -22,6 +22,8 @@ pub enum TypeSpec {
     HashMap,
     Matrix,
     Range,
+    /// `Int or Float`: a value matching any listed type.
+    Union(Vec<TypeSpec>),
     /// A struct, trait, or unresolved type-parameter name.
     Named(String),
 }
@@ -42,6 +44,10 @@ impl fmt::Display for TypeSpec {
             TypeSpec::HashMap => write!(f, "HashMap"),
             TypeSpec::Matrix => write!(f, "Matrix"),
             TypeSpec::Range => write!(f, "Range"),
+            TypeSpec::Union(members) => {
+                let names: Vec<String> = members.iter().map(ToString::to_string).collect();
+                write!(f, "{}", names.join(" or "))
+            }
             TypeSpec::Named(name) => write!(f, "{name}"),
         }
     }
