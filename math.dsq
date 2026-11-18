@@ -1,0 +1,159 @@
+def min(input: List[Int]) -> Int{
+    lowest = input[0]
+    for i in input[1:]{
+        if i < lowest{
+            lowest = i
+        }
+    }
+    lowest
+}
+
+
+def max(input: List[Int]) -> Int{
+    highest = input[0]
+    for i in input[1:]{
+        if i > highest{
+            highest = i
+        }
+    }
+    highest
+}
+
+
+def abs(input: Int or Float) -> Int or Float{
+    if input < 0 {
+        0 - input
+    }
+    else{
+        input
+    }
+}
+
+def sqrt(input: int or float) -> float{
+    input ** 0.5
+}
+
+def pow(base: Int or Float, exponent: Int or Float) -> Int or Float {
+    base ** exponent
+}
+
+def floor(value: Int or Float) -> Int {
+    whole = int(value)
+
+    if value < 0 and float(whole) != value {
+        whole - 1
+    }
+    else {
+        whole
+    }
+}
+
+def ceil(value: Int or Float) -> Int {
+    whole = int(value)
+
+    if value > 0 and float(whole) != value {
+        whole + 1
+    }
+    else {
+        whole
+    }
+}
+
+def round(value: Int or Float) -> Int {
+    whole = int(value)
+
+    if float(whole) == value {
+        return whole
+    }
+
+    if value > 0 {
+        floor(value + 0.5)
+    }
+    else {
+        ceil(value - 0.5)
+    }
+}
+
+def factorial(n: Int) -> Int {
+    assert(n >= 0, "factorial needs a non-negative Int")
+
+    if n <= 1 {
+        return 1
+    }
+
+    result = 1
+    for i in 2..=n {
+        result = result * i
+    }
+
+    result
+}
+
+# Deterministic pseudo-random numbers: call seed_random(n) to change the
+# sequence. There is no OS entropy source in the language yet.
+random_seed_value = 12345
+
+def seed_random(value: Int) {
+    random_seed_value = value % 2147483648
+
+    if random_seed_value < 0 {
+        random_seed_value = 0 - random_seed_value
+    }
+
+    random_seed_value
+}
+
+def random(minimum: Int, maximum: Int) -> Int {
+    assert(minimum <= maximum, "random(min, max) needs min <= max")
+
+    random_seed_value = (random_seed_value * 1103515245 + 12345) % 2147483648
+    minimum + random_seed_value % (maximum - minimum + 1)
+}
+
+#TEST min
+assert_eq(min([1,2,3,4,5]), 1,"INCORRECT")
+assert_eq(min([-1,2,3,4,-5]), -5,"INCORRECT")
+
+#TEST max
+assert_eq(max([-1,2,3,4,-5]), 4,"INCORRECT")
+assert_eq(max([1,2,3,4,5]), 5,"INCORRECT")
+
+#TEST sqrt
+assert_eq(sqrt(4), 2,"INCORRECT")
+assert_eq(sqrt(1), 1,"INCORRECT")
+
+#TEST factorial()
+assert_eq(factorial(1),1)
+assert_eq(factorial(5),120)
+
+#TEST abs
+assert_eq(abs(-5), 5, "INCORRECT")
+assert_eq(abs(2.5), 2.5, "INCORRECT")
+
+#TEST pow
+assert_eq(pow(2, 10), 1024, "INCORRECT")
+assert_eq(pow(9, 0.5), 3, "INCORRECT")
+
+#TEST floor()
+assert_eq(floor(2.9), 2, "INCORRECT")
+assert_eq(floor(-2.1), -3, "INCORRECT")
+
+#TEST ceil()
+assert_eq(ceil(2.1), 3, "INCORRECT")
+assert_eq(ceil(-2.9), -2, "INCORRECT")
+
+#TEST round()
+assert_eq(round(2.4), 2, "INCORRECT")
+assert_eq(round(2.5), 3, "INCORRECT")
+assert_eq(round(-2.4), -2, "INCORRECT")
+assert_eq(round(-2.5), -3, "INCORRECT")
+
+#TEST random()
+seed_random(42)
+first = random(1, 6)
+second = random(1, 6)
+assert(first >= 1 and first <= 6, "INCORRECT")
+assert(second >= 1 and second <= 6, "INCORRECT")
+assert_eq(random(5, 5), 5, "INCORRECT")
+seed_random(42)
+assert_eq(random(1, 6), first, "INCORRECT")
