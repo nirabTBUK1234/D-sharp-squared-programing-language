@@ -6,6 +6,38 @@ Release history for D#².
 Each release lists the language changes and the notes that matter for users.
 """
 
+## v1.9.0 — 2026-11-20
+
+"""
+Recoverable runtime errors with `try`/`except`/`finally` and `raise`.
+"""
+
+### Language
+
+"""
+
+- `try { ... } except name { ... }` catches runtime errors. `name` receives the
+  error message as Text, so handlers can report it or match on it.
+- `finally { ... }` always runs: after success, after a caught error, after an
+  uncaught error, and on `return`, `break`, or `continue`.
+- A `try` block may use `except`, `finally`, or both, in that order.
+- `raise "message"` aborts the script with a catchable error.
+- Built-in runtime failures are catchable too, including division by zero,
+  failed file operations, bad conversions, and type errors.
+
+"""
+
+### Notes
+
+"""
+
+- Parse and lex errors happen before execution and cannot be caught.
+- The handler binding is scoped to the handler and does not leak.
+- Catching an error does not roll back side effects performed before it.
+- Errors raised inside a handler or a `finally` block propagate outward.
+
+"""
+
 ## v1.8.0 — 2026-11-18
 
 """

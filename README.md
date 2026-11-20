@@ -10,13 +10,15 @@ hashsets, hashmaps, matrices, Python-style lists, type-enforced lists,
 Rust-style formatted output, return type annotations, built-in test blocks and
 assertions, structs with `impl` methods, traits and trait-bounded functions,
 token macros, multifile imports, console and file built-ins, value
-conversions, Rust-style ranges, union type annotations, desktop graphics,
-and a REPL.
+conversions, Rust-style ranges, union type annotations, recoverable errors,
+desktop graphics, and a REPL.
 
 It is still an early prototype: no namespaced modules, `match`/enums, or
 closures yet — see [Roadmap](#roadmap) and [Known limitations](#known-limitations).
 
-- **v1.8.0** — current release (2026-11-18): desktop graphics through `gl.*`
+- **v1.9.0** — current release (2026-11-20): recoverable runtime errors with
+  `try`/`except`/`finally` and `raise`.
+- **v1.8.0** — desktop graphics through `gl.*`
   (OpenGL 3.3 core with shaders, buffers, vertex arrays, draws, and uniforms)
   and `vk.*` (Vulkan window, swapchain, clear, and present).
 - **v1.7.0** — value conversions for every built-in type, `file(path)` objects,
@@ -53,7 +55,7 @@ closures yet — see [Roadmap](#roadmap) and [Known limitations](#known-limitati
 - Graphics use the `sdl2`, `glow`, and `ash` crates; the interpreter and
   language runtime otherwise use the Rust standard library.
 - Rust 2024 edition (Rust 1.85+)
-- Source: <https://github.com/nirabTBUK1234/D-sharp-squared-programing-language>
+- Source: <https://github.com/AlexTBUK1234/D-sharp-squared-programing-language>
 
 """
 
@@ -191,7 +193,7 @@ Assigning creates the name; there are no declaration keywords:
 ```text
 x = 1
 x = x + 1          # x is now 2
-name = "Nirab"
+name = "Alex"
 del name           # remove it again
 ```
 
@@ -258,6 +260,45 @@ for i in 1..=5 {          # 1, 2, 3, 4, 5 (inclusive)
 
 """
 
+### Recoverable errors
+
+"""
+
+```text
+try {
+    raise "invalid value"
+} except error {
+    println!("caught: {}", error)
+} finally {
+    print("cleanup")
+}
+
+try {
+    print(10 / 0)
+} except error {
+    print(error)
+}
+```
+
+- `raise text` raises a runtime error. The argument must be `Text`; the message
+  is available through the `except` binding.
+- `try { ... } except name { ... }` catches raised errors and built-in runtime
+  failures, including division by zero, failed file operations, bad
+  conversions, and type errors.
+- `try { ... } finally { ... }` runs cleanup code without catching the error.
+  `except` and `finally` may be combined, with `except` first:
+  `try { ... } except name { ... } finally { ... }`.
+- `finally` always runs after success or failure, including uncaught failures
+  and control flow that exits the `try` block with `return`, `break`, or
+  `continue`.
+- The `except` binding is scoped to the handler and does not leak outside it.
+- An error raised in an `except` or `finally` block propagates outward.
+- Catching an error does not undo side effects or assignments made before the
+  failure. Lexing and parsing errors happen before execution and cannot be
+  caught.
+
+"""
+
 ### Functions
 
 """
@@ -284,8 +325,8 @@ def min(input: List[Int]) -> Int {
     lowest
 }
 
-print(greet("Nirab"))          # Hello, Nirab!
-print(greet("Nirab", "?"))     # Hello, Nirab?
+print(greet("Alex"))          # Hello, Alex!
+print(greet("Alex", "?"))     # Hello, Alex?
 print(fact(5))                 # 120
 print(double(4))               # 8
 print(min([4, 1, 9]))          # 1
@@ -887,10 +928,10 @@ explicit index such as `{0}` or `{1:?}` selects an argument. Escapes `{{` and
 `}}` produce literal braces.
 
 ```text
-name = "Nirab"
+name = "Alex"
 scores = [91, 88, 95]
 
-println!("Hello, {}!", name)              # Hello, Nirab!
+println!("Hello, {}!", name)              # Hello, Alex!
 println!("scores: {:?}", scores)          # scores: [91, 88, 95]
 println!("{1} then {0}", "first", "second")  # second then first
 println!("literal braces: {{}}")          # literal braces: {}
@@ -1201,11 +1242,12 @@ of `DONE` or `TODO` on every entry. Progress:
   `copy`, `rename`, `exists`, `create`, and `size`.
 - Done: Rust-style ranges (`start..end`, `start..=end`), union type annotations
   (`Int or Float`), and the `**` exponentiation operator.
+- Done: recoverable runtime errors with `try`/`except`/`finally` and `raise`.
 - Done: desktop graphics through `gl.*` (OpenGL 3.3 core, including shaders,
   buffers, vertex arrays, draws, and uniforms) and `vk.*` (Vulkan window,
   swapchain, clear, and present).
-- Next: `match`/enums, closures/lexical scoping, namespaced modules, then
-  `try`/`except`/`raise`.
+- Next: lexical closures and first-class functions, namespaced modules, then
+  `match`/enums.
 - Built-in methods: `console.*`, `file.*`, `gl.*`, and `vk.*` (plus
   `print`/`input`) are implemented; the `data`, `collections`, `query`,
   `matrex`, `time`, `math`, `game`, and `system` groups are not wired up yet.
@@ -1219,7 +1261,7 @@ of `DONE` or `TODO` on every entry. Progress:
 - No namespaced modules: `import` includes a file's definitions in the current
   scope. There is no `module.name` access or selective `from ... import ...`.
   Put imports at the top level; imported files run at most once.
-- No `match`/enums, `try`/`except`, or lambdas. `{...}`
+- No `match`/enums or lambdas. `{...}`
   is a hashmap literal; `mat{...}` is the matrix type.
 - No generic structs or generic methods: type parameters with trait bounds are
   only supported on free functions, and they map to leading value parameters by

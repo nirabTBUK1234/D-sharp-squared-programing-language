@@ -192,6 +192,16 @@ pub enum StmtKind {
         name: String,
         body: Vec<Stmt>,
     },
+    /// `try { ... } except name { ... } finally { ... }`. The `except` and
+    /// `finally` parts are each optional, but at least one must be present.
+    Try {
+        body: Vec<Stmt>,
+        error_name: Option<String>,
+        handler: Option<Vec<Stmt>>,
+        finally: Option<Vec<Stmt>>,
+    },
+    /// `raise "message"`: aborts with a catchable runtime error.
+    Raise(Expr),
     Return(Option<Expr>),
     If {
         condition: Expr,

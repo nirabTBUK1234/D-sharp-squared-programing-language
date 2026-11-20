@@ -174,6 +174,18 @@ impl Parser {
                 self.advance();
                 self.test_statement(line)
             }
+            TokenKind::Try => {
+                self.advance();
+                self.try_statement(line)
+            }
+            TokenKind::Raise => {
+                self.advance();
+                let value = self.expression()?;
+                Ok(Stmt {
+                    kind: StmtKind::Raise(value),
+                    line,
+                })
+            }
             TokenKind::Return => {
                 self.advance();
                 self.return_statement(line)
@@ -421,6 +433,46 @@ impl Parser {
             line,
             format!("cannot import '{raw}': tried {tried}"),
         ))
+    }
+
+    fn try_statement(&mut self, line: usize) -> Result<Stmt, Error> {
+        let body = self.block()?;
+        let mut error_name = None;
+        let mut handler = None;
+        let mut finally = None;
+
+        if self.next_non_newline_is(&TokenKind::Except) {
+            self.skip_newlines();
+            self.consume(&TokenKind::Except, "expected 'except'")?;
+            self.skip_newlines();
+            error_name = Some(self.consume_identifier(
+                "expected a name to bind the caught error after 'except'",
+            )?);
+            handler = Some(self.block()?);
+        }
+
+        if self.next_non_newline_is(&TokenKind::Finally) {
+            self.skip_newlines();
+            self.consume(&TokenKind::Finally, "expected 'finally'")?;
+            finally = Some(self.block()?);
+        }
+
+        if handler.is_none() && finally.is_none() {
+            return Err(Error::new(
+                line,
+                "a 'try' needs an 'except' block, a 'finally' block, or both",
+            ));
+        }
+
+        Ok(Stmt {
+            kind: StmtKind::Try {
+                body,
+                error_name,
+                handler,
+                finally,
+            },
+            line,
+        })
     }
 
     fn test_statement(&mut self, line: usize) -> Result<Stmt, Error> {
@@ -1803,6 +1855,8 @@ impl Parser {
             .is_some_and(|token| std::mem::discriminant(&token.kind) == std::mem::discriminant(kind))
     }
 
+    /// Skips over newlines when looking ahead, so `try`/`except`/`finally`
+    /// clauses can start on the line after the closing brace.
     fn next_non_newline_is(&self, kind: &TokenKind) -> bool {
         self.tokens
             .iter()

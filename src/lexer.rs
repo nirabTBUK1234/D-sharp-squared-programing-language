@@ -63,6 +63,10 @@ pub enum TokenKind {
     Macro,
     Import,
     Test,
+    Try,
+    Except,
+    Finally,
+    Raise,
 
     // literals
     Identifier(String),
@@ -336,6 +340,10 @@ fn keyword(word: &str) -> TokenKind {
         "macro" => TokenKind::Macro,
         "import" => TokenKind::Import,
         "test" => TokenKind::Test,
+        "try" => TokenKind::Try,
+        "except" => TokenKind::Except,
+        "finally" => TokenKind::Finally,
+        "raise" => TokenKind::Raise,
         "and" => TokenKind::And,
         "or" => TokenKind::Or,
         "not" => TokenKind::Not,

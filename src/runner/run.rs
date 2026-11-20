@@ -1204,6 +1204,44 @@ impl<'a> Interpreter<'a> {
                     .map_err(|message| Error::new(line, message))?;
                 Ok(Flow::Normal)
             }
+            StmtKind::Try {
+                body,
+                error_name,
+                handler,
+                finally,
+            } => {
+                let outcome = self.exec_statements(body);
+
+                let outcome = match (outcome, handler, error_name) {
+                    (Err(error), Some(handler), Some(name)) => {
+                        self.env.push_scope();
+                        self.env.define(name.clone(), Value::Text(error.message.clone()));
+                        let handled = self.exec_statements(handler);
+                        self.env.pop_scope();
+                        handled
+                    }
+                    (outcome, _, _) => outcome,
+                };
+
+                match finally {
+                    Some(finally) => match self.exec_statements(finally) {
+                        Ok(Flow::Normal) => outcome,
+                        Ok(flow) => Ok(flow),
+                        Err(error) => Err(error),
+                    },
+                    None => outcome,
+                }
+            }
+            StmtKind::Raise(value) => {
+                let value = self.eval(value, line)?;
+                match value {
+                    Value::Text(message) => Err(Error::new(line, message)),
+                    other => Err(Error::new(
+                        line,
+                        format!("raise expects text, got {}", other.type_name()),
+                    )),
+                }
+            }
             StmtKind::Return(value) => {
                 if self.function_depth == 0 {
                     return Err(Error::new(line, "'return' outside of a function"));
@@ -4053,6 +4091,89 @@ mod tests {
         let env = env_after("x = 1\nx = x + 2\ny = x * 10");
         assert_eq!(env.get_value("x").unwrap(), Value::Int(3));
         assert_eq!(env.get_value("y").unwrap(), Value::Int(30));
+    }
+
+    #[test]
+    fn try_except_catches_raised_errors() {
+        let env = env_after(
+            "caught = None\n\
+             try {\n\
+                 raise \"boom\"\n\
+             } except error {\n\
+                 caught = error\n\
+             }",
+        );
+
+        assert_eq!(
+            env.get_value("caught").unwrap(),
+            Value::Text("boom".to_string())
+        );
+    }
+
+    #[test]
+    fn try_except_catches_builtin_runtime_errors() {
+        let env = env_after(
+            "message = None\n\
+             try {\n\
+                 value = 1 / 0\n\
+             } except error {\n\
+                 message = error\n\
+             }",
+        );
+
+        assert!(
+            env.get_value("message")
+                .unwrap()
+                .to_string()
+                .contains("division by zero")
+        );
+    }
+
+    #[test]
+    fn finally_runs_after_success_and_failure() {
+        let env = env_after(
+            "success = False\n\
+             failure = False\n\
+             try {\n\
+                 x = 1\n\
+             } finally {\n\
+                 success = True\n\
+             }\n\
+             try {\n\
+                 raise \"nope\"\n\
+             } except error {\n\
+                 caught = error\n\
+             } finally {\n\
+                 failure = True\n\
+             }",
+        );
+
+        assert_eq!(env.get_value("success").unwrap(), Value::Bool(true));
+        assert_eq!(env.get_value("failure").unwrap(), Value::Bool(true));
+    }
+
+    #[test]
+    fn finally_runs_when_the_error_is_not_caught() {
+        let mut env = Env::new();
+        let error = run_with_env(
+            &mut env,
+            "cleaned = False\n\
+             try {\n\
+                 raise \"unhandled\"\n\
+             } finally {\n\
+                 cleaned = True\n\
+             }",
+        )
+        .unwrap_err();
+
+        assert_eq!(error.message, "unhandled");
+        assert_eq!(env.get_value("cleaned").unwrap(), Value::Bool(true));
+    }
+
+    #[test]
+    fn raise_requires_text() {
+        let error = error_of("raise 42");
+        assert!(error.message.contains("raise expects text"), "{error}");
     }
 
     #[test]
