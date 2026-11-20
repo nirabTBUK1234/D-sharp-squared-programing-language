@@ -9,13 +9,21 @@ recursive-descent parser, functions with defaults and recursion, loops,
 hashsets, hashmaps, matrices, Python-style lists, type-enforced lists,
 Rust-style formatted output, return type annotations, built-in test blocks and
 assertions, structs with `impl` methods, traits and trait-bounded functions,
-token macros, multifile imports, console built-ins, and a REPL.
+token macros, multifile imports, console and file built-ins, desktop graphics,
+and a REPL.
 
 It is still an early prototype: no namespaced modules, `match`/enums, or
 closures yet — see [Roadmap](#roadmap) and [Known limitations](#known-limitations).
 
-- **v1.6.0** — current release (2026-11-07): Pythonic `test` blocks and
-  `assert` / `assert_eq` / `assert_ne` helpers, run with `--test`.
+- **v1.8.0** — current release (2026-11-18): desktop graphics through `gl.*`
+  (OpenGL 3.3 core with shaders, buffers, vertex arrays, draws, and uniforms)
+  and `vk.*` (Vulkan window, swapchain, clear, and present).
+- **v1.7.0** — value conversions for every built-in type, `file(path)` objects,
+  Rust-style ranges, union type annotations, aliases `=<`/`=>`, and the `**`
+  exponentiation operator (2026-11-18). Also includes the test-branch sync
+  automation.
+- **v1.6.0** — Pythonic `test` blocks and
+  `assert` / `assert_eq` / `assert_ne` helpers, run with `--test` (2026-11-07).
 - **v1.5.0** — return type annotations with
   `-> Type` on functions and methods, including generic and `List[...]` returns
   (2026-11-07).
@@ -30,10 +38,19 @@ closures yet — see [Roadmap](#roadmap) and [Known limitations](#known-limitati
   macros (2026-11-02).
 - **v1.1.0** — collection syntax release (2026-11-01): `hashSet(...)`, `{...}`
   hashmaps with `[ ]` indexing, text indexing, and `mat{...}`-only matrices.
-- **v1.0.0** — first stable release (2026-11-01); see
-  [CHANGELOG.md](CHANGELOG.md). The earlier tags
-  (`PreReleace1OfV1.0`, `PreReleace2OfV1`) were pre-releases.
-- No external crates (std only)
+- **v1.0.0** — first stable release (2026-11-01): Pythonic keywords with braced
+  blocks, plain assignment, functions, control flow, operators, text escapes,
+  console built-ins, and a persistent REPL; see
+  [CHANGELOG.md](CHANGELOG.md) for the complete list.
+- **Version 1 Pre-release 2** (2026-10-31, tag `PreReleace2OfV1`) — Pythonic
+  rewrite: `x = 1` assignment, expressions and operators, `if`/`elif`/`else`,
+  `while`/`loop`/`for`, `def` functions with defaults and recursion,
+  `True`/`False`/`None`, `#` comments, and braced blocks.
+- **Version 1 Pre-release 1** (2026-10-31, tag `PreReleace1OfV1.0`) — first
+  working interpreter: tokenizer, statement parser, Rust-like `let`/`mut`
+  variables, `hashset`/`matrix` values, console built-ins, and a REPL.
+- Graphics use the `sdl2`, `glow`, and `ash` crates; the interpreter and
+  language runtime otherwise use the Rust standard library.
 - Rust 2024 edition (Rust 1.85+)
 - Source: <https://github.com/nirabTBUK1234/D-sharp-squared-programing-language>
 

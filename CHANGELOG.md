@@ -54,7 +54,7 @@ OpenGL and Vulkan windows from D#2 scripts.
 ## v1.7.0 — 2026-11-18
 
 """
-Value conversions between every built-in type.
+Value conversions, file objects, ranges, union types, and exponentiation.
 """
 
 ### Language
@@ -440,3 +440,81 @@ The first stable release. It replaces the earlier pre-releases
   parses; the README has a migration table.
 
 """
+
+## Version 1 Pre-release 2 — 2026-10-31
+
+"""
+Pythonic rewrite of the pre-release language (tag `PreReleace2OfV1`).
+"""
+
+### Language
+
+"""
+
+- Replaced the Rust-like declaration syntax with Pythonic assignment:
+  `x = 1`, `del x`, and `True`/`False`/`None`.
+- Added a real lexer with `#` comments, text escapes (`\n`, `\t`, `\r`, `\\`,
+  `\"`, `\'`), and braced blocks instead of indentation.
+- Added expressions and operators with precedence: `and`, `or`, `not`, `==`,
+  `!=`, `<`, `<=`, `>`, `>=`, `+`, `-`, `*`, `/`, `%`, and unary negation.
+  Logic short-circuits, arithmetic is checked, and `1 == 1.0` is true.
+- Added control flow: `if` / `elif` / `else`, `while`, `loop`, `for x in ...`,
+  `break`, and `continue`.
+- Added user-defined functions: `def name(params) { ... }`, `return`, default
+  parameter values, recursion, and checked arity.
+- `for` iterates hashsets, matrix row names, and text characters.
+- Kept the `hashset ...` / `set ...` and `matrix row { cell value }` value
+  forms while the syntax was being migrated.
+- `print(...)` was available as a builtin alongside `console.*`.
+- Added `None` for bare returns and functions that fall through.
+- The REPL retained persistent state and supported multi-line blocks.
+
+"""
+
+### Notes
+
+"""
+
+- No list or hashmap literals yet; `hashset` and `matrix` keyword forms
+  remained the only collections.
+- No structs, traits, macros, imports, or typed parameters.
+- Blocks do not create scopes; only a function call creates a new scope.
+- Conditions must be Bool; there is no truthiness.
+
+"""
+
+## Version 1 Pre-release 1 — 2026-10-31
+
+"""
+First working interpreter (tag `PreReleace1OfV1.0`).
+"""
+
+### Language
+
+"""
+
+- Added the tokenizer, statement parser, and tree-walking evaluator.
+- Rust-like variable declarations: `let x`, `let mut x`, `mut x`, `const x`,
+  `static x`, `del x`, and recorded `type` aliases.
+- Two compound values: `hashset 1 2 2` / `set 1 2` and
+  `matrix row1 { a 1 b 2 } row2 { a 3 }`.
+- Int, Float, Bool, and Text values, with 64-bit signed integers and floats.
+- `console.println`, `console.print`, `console.debug`, `console.warn`,
+  `console.error`, `console.input`, and `console.clear`.
+- Persistent REPL with `quit` / `exit` / Ctrl-D.
+- Parser and runtime errors reported the source line.
+
+"""
+
+### Notes
+
+"""
+
+- No expressions or operators yet, so `1 + 2` was not valid.
+- No control flow or user-defined functions.
+- No comments, imports, modules, or escape sequences in text.
+- Only `mut` variables could be reassigned; the parser produced values
+  directly while resolving names, so parsing and evaluation were one step.
+
+"""
+
